@@ -27,6 +27,7 @@ Both **Telegram** and **Discord** (slash commands + prefix `!`) support the exac
 | `/list` | List all feeds monitored in this chat/channel | `/list` |
 | `/pause <id>` | Temporarily pause alerts for a feed (or `all`) | `/pause 1` or `/pause all` |
 | `/resume <id>` | Resume alerts for a paused feed (or `all`) | `/resume 1` or `/resume all` |
+| `/edit <id>` | Edit a feed in-place (title, filters, or URL) | `/edit 1 -title PSA -inf 1080p` |
 | `/remove <id>` | Unsubscribe and stop monitoring a feed | `/remove 1` |
 | `/filter <id> <rules>` | Configure keyword inclusion/exclusion rules | `/filter 1 inc=1080p,flac exc=cam,sample` |
 | `/check` | Force an immediate check on active feeds | `/check` |

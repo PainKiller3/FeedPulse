@@ -76,11 +76,12 @@ class DiscordBotService:
                     "📋 `/list` - List active feeds in this channel\n"
                     "⏸️ `/pause <id_or_all>` - Pause notifications for a feed or all feeds\n"
                     "▶️ `/resume <id_or_all>` - Resume notifications for a feed or all feeds\n"
+                    "✏️ `/edit <id> [title] [include] [exclude] [url]` - Edit a feed in-place\n"
                     "➖ `/remove <id_or_url>` - Unsubscribe from a feed\n"
                     "🔍 `/filter <id> <include> <exclude>` - Set keyword filters\n"
                     "🔄 `/check` - Force an immediate feed check\n"
                     "🧪 `/test` - Preview a sample torrent alert\n\n"
-                    "*(Prefix commands like `!add <url>`, `!pause <id>`, `!resume <id>` also work!)*"
+                    "*(Prefix commands like `!add <url>`, `!pause <id>`, `!resume <id>`, `!edit <id>` also work!)*"
                 ),
                 color=0x2ECC71,
             )
@@ -212,7 +213,9 @@ class DiscordBotService:
                     inline=False,
                 )
 
-            embed.set_footer(text="Manage: /pause <id> | /resume <id> | /remove <id>")
+            embed.set_footer(
+                text="Manage: /pause <id> | /resume <id> | /edit <id> | /remove <id>"
+            )
             await interaction.response.send_message(embed=embed)
 
         @self.bot.tree.command(
@@ -297,6 +300,71 @@ class DiscordBotService:
                 await interaction.response.send_message(
                     f"❌ Could not find an active subscription matching `{feed_id_or_url}`.\n"
                     "Use `/list` to check feed IDs."
+                )
+
+        @self.bot.tree.command(
+            name="edit",
+            description="Edit a feed subscription in this channel (title, filters, or URL)",
+        )
+        @app_commands.describe(
+            feed_id="The numeric feed ID from /list",
+            title="Optional new custom display title (or 'none' to reset)",
+            filter_include="Optional keywords that MUST be in the title (or 'none' to clear)",
+            filter_exclude="Optional keywords to ignore (or 'none' to clear)",
+            new_url="Optional new feed RSS/Atom URL",
+        )
+        async def slash_edit(
+            interaction: discord.Interaction,
+            feed_id: str,
+            title: Optional[str] = None,
+            filter_include: Optional[str] = None,
+            filter_exclude: Optional[str] = None,
+            new_url: Optional[str] = None,
+        ):
+            channel_id = str(interaction.channel_id)
+            if not any(
+                x is not None for x in (title, filter_include, filter_exclude, new_url)
+            ):
+                await interaction.response.send_message(
+                    "⚠️ Please specify at least one option to edit: `title`, `filter_include`, `filter_exclude`, or `new_url`."
+                )
+                return
+
+            feed_label, status, changed = await self.db.edit_subscription(
+                platform="discord",
+                target_id=channel_id,
+                feed_identifier=feed_id,
+                title=title,
+                filter_keywords=filter_include,
+                filter_exclude=filter_exclude,
+                new_url=new_url,
+            )
+
+            if status == "success":
+                embed = discord.Embed(
+                    title=f"✏️ Updated Feed #{feed_id}",
+                    color=0x2ECC71,
+                )
+                embed.add_field(
+                    name="📡 Feed",
+                    value=feed_label or feed_id,
+                    inline=False,
+                )
+                for k, v in changed.items():
+                    embed.add_field(
+                        name=f"• {k.replace('_', ' ').title()}",
+                        value=f"`{v}`",
+                        inline=True,
+                    )
+                await interaction.response.send_message(embed=embed)
+                self.poller.trigger_immediate_check()
+            elif status == "no_changes":
+                await interaction.response.send_message(
+                    f"ℹ️ No changes were made to `{feed_label or feed_id}`."
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ No matching subscription found for `{feed_id}`."
                 )
 
         @self.bot.tree.command(
@@ -391,7 +459,7 @@ class DiscordBotService:
             for s in subs:
                 paused_tag = " ⏸️ [PAUSED]" if s.get("is_paused") else ""
                 msg += f"• **[{s['feed_id']}]** {s['title']}{paused_tag} - `<{s['url']}>\n`"
-            msg += "\n*Manage:* `!pause <id>` | `!resume <id>` | `!remove <id>`"
+            msg += "\n*Manage:* `!pause <id>` | `!resume <id>` | `!edit <id>` | `!remove <id>`"
             await ctx.send(msg)
 
         @self.bot.command(name="pause")
@@ -451,6 +519,106 @@ class DiscordBotService:
                 await ctx.send(f"🗑 Removed `{removed or feed_id}` from this channel.")
             else:
                 await ctx.send(f"❌ No matching feed found for `{feed_id}`.")
+
+        @self.bot.command(name="edit")
+        async def prefix_edit(
+            ctx: commands.Context,
+            feed_id: str = None,
+            *args,
+        ):
+            if not feed_id or not args:
+                await ctx.send(
+                    "⚠️ Usage: `!edit <feed_id> [-title <name>] [-inf <include>] [-exf <exclude>] [-url <new_url>]`"
+                )
+                return
+
+            channel_id = str(ctx.channel.id)
+            title = None
+            inf = None
+            exf = None
+            new_url = None
+
+            rem = list(args)
+            i = 0
+            while i < len(rem):
+                tok = rem[i].lower()
+                if tok in ("-title", "--title", "-name", "--name"):
+                    i += 1
+                    col = []
+                    while i < len(rem) and not rem[i].startswith("-"):
+                        col.append(rem[i])
+                        i += 1
+                    if col:
+                        title = " ".join(col)
+                    continue
+                elif tok.startswith("title="):
+                    title = rem[i].split("=", 1)[1]
+                    i += 1
+                    continue
+                elif tok in ("-inf", "--inf", "-inc", "--inc"):
+                    i += 1
+                    col = []
+                    while i < len(rem) and not rem[i].startswith("-"):
+                        col.append(rem[i])
+                        i += 1
+                    if col:
+                        inf = " ".join(col)
+                    continue
+                elif tok.startswith(("inc=", "inf=")):
+                    inf = rem[i].split("=", 1)[1]
+                    i += 1
+                    continue
+                elif tok in ("-exf", "--exf", "-exc", "--exc"):
+                    i += 1
+                    col = []
+                    while i < len(rem) and not rem[i].startswith("-"):
+                        col.append(rem[i])
+                        i += 1
+                    if col:
+                        exf = " ".join(col)
+                    continue
+                elif tok.startswith(("exc=", "exf=")):
+                    exf = rem[i].split("=", 1)[1]
+                    i += 1
+                    continue
+                elif tok in ("-url", "--url", "-link", "--link"):
+                    i += 1
+                    if i < len(rem):
+                        new_url = rem[i]
+                        i += 1
+                    continue
+                elif tok.startswith(("url=", "link=")):
+                    new_url = rem[i].split("=", 1)[1]
+                    i += 1
+                    continue
+                i += 1
+
+            if not any(x is not None for x in (title, inf, exf, new_url)):
+                await ctx.send(
+                    "⚠️ Please specify at least one option to edit: `-title`, `-inf`, `-exf`, or `-url`."
+                )
+                return
+
+            feed_label, status, changed = await self.db.edit_subscription(
+                platform="discord",
+                target_id=channel_id,
+                feed_identifier=feed_id,
+                title=title,
+                filter_keywords=inf,
+                filter_exclude=exf,
+                new_url=new_url,
+            )
+
+            if status == "success":
+                lines = [f"✏️ **Updated Feed #{feed_id}** (`{feed_label or feed_id}`):"]
+                for k, v in changed.items():
+                    lines.append(f"• **{k.replace('_', ' ').title()}:** `{v}`")
+                await ctx.send("\n".join(lines))
+                self.poller.trigger_immediate_check()
+            elif status == "no_changes":
+                await ctx.send(f"ℹ️ No changes made to `{feed_label or feed_id}`.")
+            else:
+                await ctx.send(f"❌ Feed `{feed_id}` not found.")
 
         @self.bot.command(name="check")
         async def prefix_check(ctx: commands.Context):

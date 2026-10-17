@@ -153,6 +153,7 @@ class Database:
         filter_exclude: Optional[str] = None,
         thread_id: Optional[int] = None,
         user_id: Optional[int] = None,
+        custom_title: Optional[str] = None,
     ) -> Tuple[int, str, bool]:
         """
         Subscribe a target (chat, channel, topic, and user) to a feed.
@@ -178,6 +179,8 @@ class Database:
                 update_fields["filter_keywords"] = filter_keywords
             if filter_exclude is not None:
                 update_fields["filter_exclude"] = filter_exclude
+            if custom_title is not None:
+                update_fields["custom_title"] = custom_title
             if update_fields:
                 await self.db.subscriptions.update_one(
                     {"_id": existing["_id"]}, {"$set": update_fields}
@@ -190,6 +193,7 @@ class Database:
             "target_id": target_id,
             "thread_id": thread_id,
             "user_id": user_id,
+            "custom_title": custom_title,
             "filter_keywords": filter_keywords,
             "filter_exclude": filter_exclude,
             "created_at": datetime.now(timezone.utc),
@@ -487,6 +491,141 @@ class Database:
         )
         return feed_label, "success", 1
 
+    async def edit_subscription(
+        self,
+        platform: str,
+        target_id: str,
+        feed_identifier: str,
+        title: Optional[str] = None,
+        filter_keywords: Optional[str] = None,
+        filter_exclude: Optional[str] = None,
+        new_url: Optional[str] = None,
+        thread_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> Tuple[Optional[str], str, Dict[str, Any]]:
+        """
+        Edit a subscription in-place: title, include/exclude filters, or feed URL.
+        Returns (feed_label, status_code, changed_summary).
+        status_code: 'success', 'not_found', 'permission_denied', 'no_changes'
+        """
+        target_id = str(target_id)
+        platform = platform.lower()
+        feed_identifier = feed_identifier.strip()
+        is_private = (user_id is not None) and (str(target_id) == str(user_id))
+
+        if feed_identifier.isdigit():
+            feed_doc = await self.db.feeds.find_one({"feed_id": int(feed_identifier)})
+        else:
+            feed_doc = await self.db.feeds.find_one(
+                {
+                    "$or": [
+                        {"url": feed_identifier},
+                        {"title": {"$regex": feed_identifier, "$options": "i"}},
+                    ]
+                }
+            )
+
+        if not feed_doc:
+            return None, "not_found", {}
+
+        feed_id = feed_doc["feed_id"]
+        feed_label = feed_doc.get("title") or feed_doc.get("url")
+
+        base_query: Dict[str, Any] = {
+            "feed_id": feed_id,
+            "platform": platform,
+            "target_id": target_id,
+        }
+        if thread_id is not None:
+            base_query["thread_id"] = thread_id
+
+        existing_subs = await self.db.subscriptions.find(base_query).to_list(length=100)
+        if not existing_subs:
+            if is_private and user_id is not None:
+                user_subs = await self.db.subscriptions.find(
+                    {"feed_id": feed_id, "platform": platform, "user_id": user_id}
+                ).to_list(length=10)
+                if user_subs:
+                    existing_subs = user_subs
+            if not existing_subs:
+                return None, "not_found", {}
+
+        if not is_admin and not is_private and user_id is not None:
+            user_sub = next(
+                (s for s in existing_subs if s.get("user_id") == user_id), None
+            )
+            if not user_sub:
+                return feed_label, "permission_denied", {}
+            target_sub = user_sub
+        else:
+            if user_id is not None:
+                user_sub = next(
+                    (s for s in existing_subs if s.get("user_id") == user_id), None
+                )
+                target_sub = user_sub if user_sub else existing_subs[0]
+            else:
+                target_sub = existing_subs[0]
+
+        update_fields: Dict[str, Any] = {}
+        changed_summary: Dict[str, Any] = {}
+
+        if title is not None:
+            clean_title = title.strip()
+            if clean_title.lower() in ("none", "clear", "default"):
+                update_fields["custom_title"] = None
+                changed_summary["title"] = "Reset to feed default"
+            else:
+                update_fields["custom_title"] = clean_title
+                changed_summary["title"] = clean_title
+
+        if filter_keywords is not None:
+            clean_inc = filter_keywords.strip()
+            if clean_inc.lower() in ("none", "clear"):
+                update_fields["filter_keywords"] = None
+                changed_summary["filter_keywords"] = "Cleared"
+            else:
+                update_fields["filter_keywords"] = clean_inc
+                changed_summary["filter_keywords"] = clean_inc
+
+        if filter_exclude is not None:
+            clean_exc = filter_exclude.strip()
+            if clean_exc.lower() in ("none", "clear"):
+                update_fields["filter_exclude"] = None
+                changed_summary["filter_exclude"] = "Cleared"
+            else:
+                update_fields["filter_exclude"] = clean_exc
+                changed_summary["filter_exclude"] = clean_exc
+
+        if (
+            new_url is not None
+            and new_url.strip()
+            and new_url.strip() != feed_doc["url"]
+        ):
+            clean_new_url = new_url.strip()
+            new_feed_id, new_feed_title = await self.add_or_get_feed(clean_new_url)
+            update_fields["feed_id"] = new_feed_id
+            changed_summary["url"] = clean_new_url
+
+            old_sub_count = await self.db.subscriptions.count_documents(
+                {"feed_id": feed_id, "_id": {"$ne": target_sub["_id"]}}
+            )
+            if old_sub_count == 0:
+                await self.db.feeds.update_one(
+                    {"feed_id": feed_id}, {"$set": {"is_active": False}}
+                )
+            await self.db.feeds.update_one(
+                {"feed_id": new_feed_id}, {"$set": {"is_active": True}}
+            )
+
+        if not update_fields:
+            return feed_label, "no_changes", {}
+
+        await self.db.subscriptions.update_one(
+            {"_id": target_sub["_id"]}, {"$set": update_fields}
+        )
+        return feed_label, "success", changed_summary
+
     async def list_subscriptions(
         self,
         platform: str,
@@ -528,7 +667,8 @@ class Database:
                 "$project": {
                     "feed_id": "$feed_id",
                     "url": "$feed_info.url",
-                    "title": "$feed_info.title",
+                    "title": {"$ifNull": ["$custom_title", "$feed_info.title"]},
+                    "custom_title": "$custom_title",
                     "last_checked": "$feed_info.last_checked",
                     "filter_keywords": "$filter_keywords",
                     "filter_exclude": "$filter_exclude",
@@ -563,7 +703,8 @@ class Database:
                 "$project": {
                     "feed_id": "$feed_id",
                     "url": "$feed_info.url",
-                    "title": "$feed_info.title",
+                    "title": {"$ifNull": ["$custom_title", "$feed_info.title"]},
+                    "custom_title": "$custom_title",
                     "platform": "$platform",
                     "target_id": "$target_id",
                     "thread_id": "$thread_id",

@@ -93,6 +93,7 @@ class TelegramBotService:
         self.application.add_handler(
             CommandHandler(["resume", "unmute"], self.cmd_resume)
         )
+        self.application.add_handler(CommandHandler("edit", self.cmd_edit))
         self.application.add_handler(CommandHandler("filter", self.cmd_filter))
         self.application.add_handler(CommandHandler("check", self.cmd_check))
         self.application.add_handler(CommandHandler("test", self.cmd_test))
@@ -114,6 +115,7 @@ class TelegramBotService:
             BotCommand("myfeeds", "View your subscriptions across all chats"),
             BotCommand("pause", "Pause notifications for a feed or 'all'"),
             BotCommand("resume", "Resume notifications for a feed or 'all'"),
+            BotCommand("edit", "Edit a feed subscription in-place"),
             BotCommand("remove", "Unsubscribe from a feed"),
             BotCommand("filter", "Configure keyword filters (inc=/exc=)"),
             BotCommand("check", "Force an immediate feed check"),
@@ -277,6 +279,7 @@ class TelegramBotService:
             "👤 /myfeeds — View all your subscriptions across all chats\n"
             "⏸️ /pause &lt;id_or_all&gt; [chat/channel] — Pause notifications\n"
             "▶️ /resume &lt;id_or_all&gt; [chat/channel] — Resume notifications\n"
+            "✏️ /edit &lt;id&gt; [-title &lt;name&gt;] [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [-url &lt;new_url&gt;] — Edit feed in-place\n"
             "➖ /remove &lt;id&gt; [chat/channel] — Unsubscribe from a feed\n"
             "🔍 /filter &lt;id&gt; -inf &lt;words&gt; -exf &lt;words&gt; — Keyword filters\n"
             "🔄 /check — Force an immediate feed check\n"
@@ -290,6 +293,8 @@ class TelegramBotService:
             "• Pause or resume notifications:\n"
             "  /pause 1 or /pause all\n"
             "  /resume 1 or /resume all\n"
+            "• Edit feed settings in-place:\n"
+            "  /edit 1 -title PSA Movies -inf 1080p,flac -exf 720p,cam\n"
             "• Update filters for feed #1:\n"
             "  /filter 1 -inf PSA,1080p -exf 720p\n"
             "• List your feeds in current chat:\n"
@@ -529,6 +534,7 @@ class TelegramBotService:
                 filter_keywords=inc_filter,
                 filter_exclude=exc_filter,
                 user_id=user_id,
+                custom_title=custom_title,
             )
 
             # Signal poller to register and track
@@ -635,7 +641,7 @@ class TelegramBotService:
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
         lines.append(
-            "<i>Manage:</i> /pause &lt;id&gt; | /resume &lt;id&gt; | /remove &lt;id&gt;"
+            "<i>Manage:</i> /pause &lt;id&gt; | /resume &lt;id&gt; | /edit &lt;id&gt; | /remove &lt;id&gt;"
         )
         await update.effective_message.reply_html(
             "\n".join(lines), disable_web_page_preview=True
@@ -736,7 +742,7 @@ class TelegramBotService:
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
         lines.append(
-            "<i>Manage:</i> /pause &lt;id&gt; | /resume &lt;id&gt; | /remove &lt;id&gt;"
+            "<i>Manage:</i> /pause &lt;id&gt; | /resume &lt;id&gt; | /edit &lt;id&gt; | /remove &lt;id&gt;"
         )
         await update.effective_message.reply_html(
             "\n".join(lines), disable_web_page_preview=True
@@ -1034,6 +1040,317 @@ class TelegramBotService:
         else:
             await update.effective_message.reply_html(
                 f"❌ Could not find an active subscription for Feed #{feed_id_str} in {dest_str}."
+            )
+
+    @staticmethod
+    def _parse_edit_args(
+        args: List[str],
+    ) -> Tuple[
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+    ]:
+        """
+        Parse arguments for /edit command.
+        Supports:
+          /edit <feed_id> [-title <new_title>] [-inf <include>] [-exf <exclude>] [-url <new_url>] [@channel]
+        Returns (feed_identifier, title, inc_filter, exc_filter, new_url, target_arg, thread_arg)
+        """
+        if not args:
+            return None, None, None, None, None, None, None
+
+        feed_identifier = args[0].strip()
+        rem = args[1:]
+
+        title: Optional[str] = None
+        inc_filter: Optional[str] = None
+        exc_filter: Optional[str] = None
+        new_url: Optional[str] = None
+        target_arg: Optional[str] = None
+        thread_arg: Optional[str] = None
+
+        i = 0
+        while i < len(rem):
+            token = rem[i].strip()
+            lower = token.lower()
+
+            if lower in ("-title", "--title", "-name", "--name"):
+                i += 1
+                collected = []
+                while i < len(rem) and not rem[i].startswith(
+                    (
+                        "-inf",
+                        "--inf",
+                        "-inc",
+                        "--inc",
+                        "-exf",
+                        "--exf",
+                        "-exc",
+                        "--exc",
+                        "-url",
+                        "--url",
+                        "@",
+                        "-100",
+                    )
+                ):
+                    collected.append(rem[i].strip())
+                    i += 1
+                if collected:
+                    title = " ".join(collected)
+                continue
+
+            elif lower.startswith(("title=", "name=", "-title=", "-name=")):
+                title = token.split("=", 1)[1].strip()
+                i += 1
+                continue
+
+            elif lower in (
+                "-inf",
+                "--inf",
+                "-inc",
+                "--inc",
+                "-include",
+                "--include",
+            ):
+                i += 1
+                collected = []
+                while i < len(rem) and not rem[i].startswith(
+                    (
+                        "-title",
+                        "--title",
+                        "-name",
+                        "--name",
+                        "-exf",
+                        "--exf",
+                        "-exc",
+                        "--exc",
+                        "-url",
+                        "--url",
+                        "@",
+                        "-100",
+                    )
+                ):
+                    collected.append(rem[i].strip())
+                    i += 1
+                if collected:
+                    inc_filter = " ".join(collected)
+                continue
+
+            elif lower.startswith(("inc=", "inf=", "-inf=", "-inc=")):
+                inc_filter = token.split("=", 1)[1].strip()
+                i += 1
+                continue
+
+            elif lower in (
+                "-exf",
+                "--exf",
+                "-exc",
+                "--exc",
+                "-exclude",
+                "--exclude",
+            ):
+                i += 1
+                collected = []
+                while i < len(rem) and not rem[i].startswith(
+                    (
+                        "-title",
+                        "--title",
+                        "-name",
+                        "--name",
+                        "-inf",
+                        "--inf",
+                        "-inc",
+                        "--inc",
+                        "-url",
+                        "--url",
+                        "@",
+                        "-100",
+                    )
+                ):
+                    collected.append(rem[i].strip())
+                    i += 1
+                if collected:
+                    exc_filter = " ".join(collected)
+                continue
+
+            elif lower.startswith(("exc=", "exf=", "-exf=", "-exc=")):
+                exc_filter = token.split("=", 1)[1].strip()
+                i += 1
+                continue
+
+            elif lower in ("-url", "--url", "-link", "--link"):
+                i += 1
+                if i < len(rem):
+                    new_url = rem[i].strip()
+                    i += 1
+                continue
+
+            elif lower.startswith(("url=", "link=", "-url=", "-link=")):
+                new_url = token.split("=", 1)[1].strip()
+                i += 1
+                continue
+
+            elif token.startswith("@") or (
+                token.startswith("-100") and token[1:].isdigit()
+            ):
+                target_arg = token
+                if i + 1 < len(rem) and rem[i + 1].strip().isdigit():
+                    thread_arg = rem[i + 1].strip()
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            elif (
+                (token.startswith("-") and token[1:].isdigit())
+                or (len(token) >= 7 and token.isdigit())
+            ) and not target_arg:
+                target_arg = token
+                if i + 1 < len(rem) and rem[i + 1].strip().isdigit():
+                    thread_arg = rem[i + 1].strip()
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            elif token.isdigit() and target_arg and not thread_arg:
+                thread_arg = token
+                i += 1
+                continue
+
+            i += 1
+
+        return (
+            feed_identifier,
+            title,
+            inc_filter,
+            exc_filter,
+            new_url,
+            target_arg,
+            thread_arg,
+        )
+
+    async def cmd_edit(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """
+        Edit feed subscription in-place (title, include/exclude filters, or URL):
+        • /edit <feed_id> -title "New Title"
+        • /edit <feed_id> -inf 1080p,flac -exf cam,hindi
+        • /edit <feed_id> -url https://new-feed-url.com/rss
+        • /edit <feed_id> -inf none (clear filter)
+        """
+        if not await self.check_authorization(update, context):
+            return
+
+        if not context.args or len(context.args) < 2:
+            await update.effective_message.reply_html(
+                "⚠️ <b>Usage:</b>\n"
+                "• /edit &lt;feed_id&gt; -title &lt;new_name&gt;\n"
+                "• /edit &lt;feed_id&gt; -inf &lt;include_words&gt; [-exf &lt;exclude_words&gt;]\n"
+                "• /edit &lt;feed_id&gt; -url &lt;new_rss_url&gt;\n"
+                "• /edit &lt;feed_id&gt; [flags] [@channel_or_chat_id]\n\n"
+                "<b>Examples:</b>\n"
+                "• Change title: <code>/edit 1 -title PSA Movies</code>\n"
+                "• Update filters: <code>/edit 1 -inf 1080p,flac -exf 720p,cam</code>\n"
+                "• Clear a filter: <code>/edit 1 -exf none</code>\n"
+                "• Reset custom title: <code>/edit 1 -title none</code>"
+            )
+            return
+
+        user = update.effective_user
+        user_id = user.id if user else 0
+        is_admin = await self.is_admin_or_super(update)
+
+        (
+            feed_identifier,
+            new_title,
+            inc_filter,
+            exc_filter,
+            new_url,
+            target_arg,
+            thread_arg,
+        ) = self._parse_edit_args(context.args)
+
+        if not any(x is not None for x in (new_title, inc_filter, exc_filter, new_url)):
+            await update.effective_message.reply_html(
+                "⚠️ <b>No changes specified!</b>\n\n"
+                "Please specify at least one setting to edit using:\n"
+                "• <code>-title &lt;name&gt;</code>\n"
+                "• <code>-inf &lt;include keywords&gt;</code>\n"
+                "• <code>-exf &lt;exclude keywords&gt;</code>\n"
+                "• <code>-url &lt;new url&gt;</code>"
+            )
+            return
+
+        target_id, thread_id, target_title = await self._resolve_destination(
+            update, context, target_arg, thread_arg
+        )
+        if not target_id:
+            return
+
+        dest_str = html.escape(target_title)
+        if thread_id:
+            dest_str += f" [Topic: #{thread_id}]"
+
+        feed_label, status, changed = await self.db.edit_subscription(
+            platform="telegram",
+            target_id=target_id,
+            feed_identifier=feed_identifier,
+            title=new_title,
+            filter_keywords=inc_filter,
+            filter_exclude=exc_filter,
+            new_url=new_url,
+            thread_id=thread_id,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+
+        if status == "success":
+            lines = [
+                "✏️ <b>Feed Updated Successfully!</b>\n",
+                f"📡 <b>Feed:</b> {html.escape(feed_label or feed_identifier)}",
+                f"🎯 <b>Destination:</b> {dest_str}\n",
+                "<b>Updated Settings:</b>",
+            ]
+            if "title" in changed:
+                lines.append(f"• 🏷 <b>Title:</b> {html.escape(changed['title'])}")
+            if "filter_keywords" in changed:
+                lines.append(
+                    f"• 🔍 <b>Include Filter:</b> {html.escape(changed['filter_keywords'])}"
+                )
+            if "filter_exclude" in changed:
+                lines.append(
+                    f"• 🚫 <b>Exclude Filter:</b> {html.escape(changed['filter_exclude'])}"
+                )
+            if "url" in changed:
+                lines.append(
+                    f"• 🔗 <b>Feed URL:</b> <code>{html.escape(changed['url'])}</code>"
+                )
+
+            await update.effective_message.reply_html(
+                "\n".join(lines), disable_web_page_preview=True
+            )
+            self.poller.trigger_immediate_check()
+
+        elif status == "permission_denied":
+            await update.effective_message.reply_html(
+                f"⛔ <b>Permission Denied:</b> Feed <b>{html.escape(feed_label or feed_identifier)}</b> "
+                f"was subscribed by another user in {dest_str}.\n\n"
+                "You can only edit feeds you added. Group Admins and Bot Owners can edit any feed."
+            )
+        elif status == "no_changes":
+            await update.effective_message.reply_html(
+                f"ℹ️ No changes were made to <b>{html.escape(feed_label or feed_identifier)}</b>."
+            )
+        else:
+            await update.effective_message.reply_html(
+                f"❌ Subscription not found for <code>{html.escape(feed_identifier)}</code> in {dest_str}.\n"
+                "Use /list to see your active feed IDs."
             )
 
     async def cmd_check(
