@@ -4,25 +4,31 @@ import signal
 import sys
 from typing import List
 
-try:
-    from config import (
-        BOT_TOKEN,
-        DISCORD_BOT_TOKEN,
-        DATABASE_URL,
-        POLL_INTERVAL_SECONDS,
-    )
-except ImportError:
-    from config_sample import (
-        BOT_TOKEN,
-        DISCORD_BOT_TOKEN,
-        DATABASE_URL,
-        POLL_INTERVAL_SECONDS,
-    )
+import os
 from database.db import Database
 from services.dispatcher import NotificationDispatcher
 from services.poller import FeedPoller
 from bots.telegram_bot import TelegramBotService
 from bots.discord_bot import DiscordBotService
+
+try:
+    import config
+except ImportError:
+    import config_sample as config
+
+# Allow cloud platforms (Heroku, Render, Railway, Koyeb) to provide env vars directly
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or getattr(config, "BOT_TOKEN", "").strip()
+DATABASE_URL = (
+    os.environ.get("DATABASE_URL") or getattr(config, "DATABASE_URL", "").strip()
+)
+DISCORD_BOT_TOKEN = (
+    os.environ.get("DISCORD_BOT_TOKEN")
+    or getattr(config, "DISCORD_BOT_TOKEN", "").strip()
+)
+POLL_INTERVAL_SECONDS = int(
+    os.environ.get("POLL_INTERVAL_SECONDS")
+    or getattr(config, "POLL_INTERVAL_SECONDS", 120)
+)
 
 if sys.platform == "win32":
     try:

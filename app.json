@@ -1,0 +1,36 @@
+{
+  "name": "FeedPulse",
+  "description": "Realtime RSS & BitTorrent Notifier Bot for Telegram and Discord",
+  "repository": "https://github.com/PainKiller3/FeedPulse",
+  "keywords": ["telegram", "discord", "rss", "torrent", "notifier", "bot", "feedpulse"],
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "MongoDB URI from MongoDB Atlas (mongodb+srv://...)",
+      "required": true
+    },
+    "DISCORD_BOT_TOKEN": {
+      "description": "Discord Bot Token from Discord Developer Portal (optional)",
+      "required": false
+    },
+    "POLL_INTERVAL_SECONDS": {
+      "description": "Feed check frequency in seconds (default: 120)",
+      "value": "120",
+      "required": false
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}

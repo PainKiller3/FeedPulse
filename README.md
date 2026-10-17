@@ -130,6 +130,39 @@ You can fine-tune what torrents trigger alerts:
 
 ---
 
+## ☁️ Cloud Deployment (Heroku, Render, Railway, Koyeb)
+
+FeedPulse is pre-configured for seamless cloud deployment. You don't need to commit your `config.py`—simply set your tokens in your platform's dashboard **Environment Variables**:
+
+| Variable | Description | Required |
+| :--- | :--- | :--- |
+| `BOT_TOKEN` | Telegram Bot Token from @BotFather | Yes (if using Telegram) |
+| `DATABASE_URL` | MongoDB URI from MongoDB Atlas (`mongodb+srv://...`) | **Yes** |
+| `DISCORD_BOT_TOKEN` | Discord Bot Token from Developer Portal | Optional |
+| `POLL_INTERVAL_SECONDS` | Feed polling frequency in seconds (default: `120`) | Optional |
+
+### 🟣 Deploy to Heroku
+1. Create a new **app** on [Heroku](https://www.heroku.com).
+2. Add `BOT_TOKEN` and `DATABASE_URL` under Settings → Config Vars.
+3. In your Heroku app's **Resources** tab, enable the `worker` dyno.
+
+### 🔵 Deploy to Render
+1. Create a new **Background Worker** on [Render](https://render.com).
+2. Connect your `FeedPulse` repository (Render auto-detects `render.yaml`).
+3. Add `BOT_TOKEN` and `DATABASE_URL` under **Environment Variables**.
+
+### 🚂 Deploy to Railway
+1. Create a **New Project** on [Railway](https://railway.app) and select your GitHub repo.
+2. Railway will automatically detect the `Procfile` and deploy as a worker service.
+3. In the **Variables** tab, add `BOT_TOKEN` and `DATABASE_URL`.
+
+### ⚡ Deploy to Koyeb
+1. Create a new **service** on [Koyeb](https://app.koyeb.com) from GitHub.
+2. Select your repository and choose **Worker** service type.
+3. Add `BOT_TOKEN` and `DATABASE_URL` in the environment settings.
+
+---
+
 ## 🐳 Running with Docker
 
 Run FeedPulse in the background with automatic restart using Docker Compose:
