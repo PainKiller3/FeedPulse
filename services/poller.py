@@ -214,10 +214,13 @@ class FeedPoller:
     async def _notify_subscribers(
         self, subscribers: List[Dict[str, Any]], item: FeedItem, feed_title: str
     ) -> None:
-        """Dispatch item to all subscribers matching keyword filters."""
+        """Dispatch item to all subscribers matching keyword filters, deduplicated per destination."""
+        sent_destinations = set()
+
         for sub in subscribers:
             platform = sub["platform"]
             target_id = sub["target_id"]
+            thread_id = sub.get("thread_id")
             filter_keywords = sub.get("filter_keywords")
             filter_exclude = sub.get("filter_exclude")
 
@@ -235,11 +238,17 @@ class FeedPoller:
                 )
                 continue
 
-            thread_id = sub.get("thread_id")
+            # Prevent duplicate alerts to the same chat/topic when multiple users subscribe to the same feed
+            dest_key = (platform, target_id, thread_id)
+            if dest_key in sent_destinations:
+                continue
+
             try:
-                await self.dispatcher.dispatch(
+                success = await self.dispatcher.dispatch(
                     platform, target_id, item, feed_title, thread_id=thread_id
                 )
+                if success:
+                    sent_destinations.add(dest_key)
             except Exception as e:
                 logger.error(
                     "Failed to dispatch alert to %s:%s (thread: %s): %s",

@@ -30,6 +30,7 @@ class TelegramBotService:
         owner_id: int = 0,
         authorized_chats: Optional[List[int]] = None,
         sudo_users: Optional[List[int]] = None,
+        max_feeds_per_user: int = 25,
     ):
         self.token = token
         self.db = db
@@ -38,7 +39,33 @@ class TelegramBotService:
         self.owner_id: int = owner_id or 0
         self.authorized_chats: Set[int] = set(authorized_chats or [])
         self.sudo_users: Set[int] = set(sudo_users or [])
+        self.max_feeds_per_user: int = max_feeds_per_user
         self.application: Optional[Application] = None
+
+    def is_super_user(self, user_id: int) -> bool:
+        """Check if a user has bot owner or sudo privileges."""
+        if not user_id:
+            return False
+        return (self.owner_id and user_id == self.owner_id) or (
+            user_id in self.sudo_users
+        )
+
+    async def is_admin_or_super(self, update: Update) -> bool:
+        """Check if caller has bot superuser or group admin privileges."""
+        user = update.effective_user
+        chat = update.effective_chat
+        if not user:
+            return False
+        if self.is_super_user(user.id):
+            return True
+        if chat and chat.type in ("group", "supergroup"):
+            try:
+                member = await chat.get_member(user.id)
+                if member.status in ("creator", "administrator"):
+                    return True
+            except Exception:
+                pass
+        return False
 
     async def start(self) -> None:
         """Initialize and start the Telegram bot polling."""
@@ -56,6 +83,9 @@ class TelegramBotService:
         self.application.add_handler(CommandHandler("id", self.cmd_id))
         self.application.add_handler(CommandHandler("add", self.cmd_add))
         self.application.add_handler(CommandHandler(["list", "feeds"], self.cmd_list))
+        self.application.add_handler(
+            CommandHandler(["myfeeds", "mysubs"], self.cmd_myfeeds)
+        )
         self.application.add_handler(
             CommandHandler(["remove", "del", "delete"], self.cmd_remove)
         )
@@ -76,9 +106,10 @@ class TelegramBotService:
         # Automatically register command autocompletion menu with Telegram
         commands = [
             BotCommand("add", "Subscribe to an RSS/torrent feed"),
-            BotCommand("list", "View all active subscriptions"),
+            BotCommand("list", "View active feed subscriptions"),
+            BotCommand("myfeeds", "View your subscriptions across all chats"),
             BotCommand("remove", "Unsubscribe from a feed"),
-            BotCommand("filter", "Configure keyword filters"),
+            BotCommand("filter", "Configure keyword filters (inc=/exc=)"),
             BotCommand("check", "Force an immediate feed check"),
             BotCommand("test", "Preview sample torrent notification"),
             BotCommand("id", "Show Chat ID, Topic ID, and User ID"),
@@ -236,7 +267,8 @@ class TelegramBotService:
             "direct <code>.torrent</code> downloads, and 1-click Magnet links!\n\n"
             "<b>Available Commands:</b>\n"
             "➕ /add &lt;url&gt; [chat/channel] [topic_id] — Subscribe to a feed\n"
-            "📋 /list [chat/channel] — View subscribed feeds\n"
+            "📋 /list [all] [chat/channel] — View your subscribed feeds (or all feeds if admin)\n"
+            "👤 /myfeeds — View all your subscriptions across all chats\n"
             "➖ /remove &lt;id&gt; [chat/channel] — Unsubscribe from a feed\n"
             "🔍 /filter &lt;id&gt; inc=&lt;words&gt; exc=&lt;words&gt; — Keyword filters\n"
             "🔄 /check — Force an immediate feed check\n"
@@ -248,7 +280,13 @@ class TelegramBotService:
             "• Subscribe a channel from DM:\n"
             "  /add https://example.com/rss/feed.xml @MyChannel\n"
             "• Subscribe a forum topic from DM:\n"
-            "  /add https://example.com/rss/feed.xml -1001234567890 42"
+            "  /add https://example.com/rss/feed.xml -1001234567890 42\n"
+            "• List your feeds in current chat:\n"
+            "  /list\n"
+            "• List all feeds in current chat (Admins only):\n"
+            "  /list all\n"
+            "• List all your feeds across all chats:\n"
+            "  /myfeeds"
         )
         await update.effective_message.reply_html(text, disable_web_page_preview=True)
 
@@ -277,6 +315,10 @@ class TelegramBotService:
         if not await self.check_authorization(update, context):
             return
 
+        user = update.effective_user
+        user_id = user.id if user else 0
+        user_name = user.full_name or user.first_name if user else f"User {user_id}"
+
         if not context.args:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
@@ -286,6 +328,17 @@ class TelegramBotService:
                 "/add https://example.com/rss/feed.xml @MyChannel"
             )
             return
+
+        # Quota verification for regular users
+        if self.max_feeds_per_user > 0 and not self.is_super_user(user_id):
+            active_count = await self.db.count_user_subscriptions(user_id)
+            if active_count >= self.max_feeds_per_user:
+                await update.effective_message.reply_html(
+                    f"⚠️ <b>Feed Limit Reached:</b> You have reached your limit of "
+                    f"<b>{self.max_feeds_per_user}</b> active feed subscriptions.\n\n"
+                    "Please remove unused feeds with /remove before adding new ones."
+                )
+                return
 
         url = context.args[0].strip()
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -327,6 +380,7 @@ class TelegramBotService:
                 url=url,
                 title=feed_title,
                 thread_id=thread_id,
+                user_id=user_id,
             )
 
             # Signal poller to register and track
@@ -336,12 +390,15 @@ class TelegramBotService:
             if thread_id:
                 dest_str += f" [Topic: <code>#{thread_id}</code>]"
 
+            subscriber_label = f"{html.escape(user_name)} (<code>{user_id}</code>)"
+
             if is_new:
                 reply_text = (
                     f"✅ <b>Successfully Subscribed!</b>\n\n"
                     f"📡 <b>Feed:</b> {html.escape(effective_title)}\n"
                     f"🆔 <b>Feed ID:</b> <code>{feed_id}</code>\n"
                     f"🎯 <b>Destination:</b> {dest_str}\n"
+                    f"👤 <b>Subscriber:</b> {subscriber_label}\n"
                     f"🔗 <b>URL:</b> {html.escape(url)}\n"
                     f"📦 <b>Current Items:</b> {len(items)}\n\n"
                     f"🔔 FeedPulse will notify every {POLL_INTERVAL_SECONDS}s when new uploads appear."
@@ -349,7 +406,7 @@ class TelegramBotService:
             else:
                 reply_text = (
                     f"ℹ️ <b>Already Subscribed!</b>\n\n"
-                    f"{dest_str} is already monitoring <b>{html.escape(effective_title)}</b> (ID: <code>{feed_id}</code>)."
+                    f"You are already monitoring <b>{html.escape(effective_title)}</b> (ID: <code>{feed_id}</code>) in {dest_str}."
                 )
 
             await status_msg.edit_text(
@@ -362,6 +419,53 @@ class TelegramBotService:
                 f"❌ Error while adding feed: {html.escape(str(e))}"
             )
 
+    async def cmd_myfeeds(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """List all subscriptions across all chats for the current user."""
+        if not await self.check_authorization(update, context):
+            return
+
+        user = update.effective_user
+        user_id = user.id if user else 0
+        subs = await self.db.list_user_all_subscriptions(user_id)
+
+        if not subs:
+            await update.effective_message.reply_html(
+                "📭 <b>You have no active subscriptions anywhere.</b>\n\n"
+                "Use /add &lt;feed_url&gt; to start monitoring a feed!"
+            )
+            return
+
+        lines = [f"📋 <b>Your Global Subscriptions ({len(subs)}):</b>\n"]
+        for s in subs:
+            title = html.escape(s.get("title") or "Untitled Feed")
+            url = html.escape(s.get("url", ""))
+            fid = s["feed_id"]
+            tgt = s["target_id"]
+            tid = s.get("thread_id")
+            checked = s.get("last_checked") or "Not yet checked"
+
+            dest_info = f"<code>{tgt}</code>"
+            if tid:
+                dest_info += f" [Topic: <code>#{tid}</code>]"
+
+            lines.append(f"• <b>[{fid}] {title}</b>")
+            lines.append(f"  🎯 Destination: {dest_info}")
+            lines.append(f"  🔗 <code>{url}</code>")
+            if s.get("filter_keywords"):
+                lines.append(
+                    f"  🔍 <i>Include: {html.escape(s['filter_keywords'])}</i>"
+                )
+            if s.get("filter_exclude"):
+                lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
+            lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
+
+        lines.append("<i>To remove a feed, use:</i> /remove &lt;id&gt;")
+        await update.effective_message.reply_html(
+            "\n".join(lines), disable_web_page_preview=True
+        )
+
     async def cmd_list(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -369,15 +473,36 @@ class TelegramBotService:
         if not await self.check_authorization(update, context):
             return
 
-        target_arg = context.args[0] if context.args else None
+        user = update.effective_user
+        user_id = user.id if user else 0
+        is_admin = await self.is_admin_or_super(update)
+
+        raw_args = list(context.args or [])
+        show_my = any(a.lower() in ("my", "mine") for a in raw_args)
+        if show_my:
+            await self.cmd_myfeeds(update, context)
+            return
+
+        show_all = any(a.lower() in ("all", "-all", "--all") for a in raw_args)
+        filtered_args = [
+            a for a in raw_args if a.lower() not in ("all", "-all", "--all")
+        ]
+        target_arg = filtered_args[0] if filtered_args else None
+
         target_id, thread_id, target_title = await self._resolve_destination(
             update, context, target_arg
         )
         if not target_id:
             return
 
+        # Regular users only see their own feeds; admins see all if requested
+        if show_all and is_admin:
+            filter_user_id = None
+        else:
+            filter_user_id = user_id
+
         subs = await self.db.list_subscriptions(
-            "telegram", target_id, thread_id=thread_id
+            "telegram", target_id, thread_id=thread_id, user_id=filter_user_id
         )
 
         dest_label = html.escape(target_title)
@@ -385,23 +510,40 @@ class TelegramBotService:
             dest_label += f" [Topic: #{thread_id}]"
 
         if not subs:
-            await update.effective_message.reply_html(
-                f"📭 <b>No active subscriptions for {dest_label}.</b>\n\n"
-                "Use /add &lt;feed_url&gt; to start monitoring a feed!"
-            )
+            if filter_user_id is None:
+                await update.effective_message.reply_html(
+                    f"📭 <b>No active subscriptions for {dest_label}.</b>\n\n"
+                    "Use /add &lt;feed_url&gt; to start monitoring a feed!"
+                )
+            else:
+                msg = (
+                    f"📭 <b>You have no active subscriptions for {dest_label}.</b>\n\n"
+                    "Use /add &lt;feed_url&gt; to start monitoring a feed!"
+                )
+                if is_admin:
+                    msg += "\n\n💡 <i>Admins: use /list all to view all feeds in this destination.</i>"
+                await update.effective_message.reply_html(msg)
             return
 
-        lines = [f"📋 <b>Active Subscriptions for {dest_label} ({len(subs)}):</b>\n"]
+        header = (
+            f"📋 <b>All Subscriptions for {dest_label} ({len(subs)}):</b>\n"
+            if filter_user_id is None
+            else f"📋 <b>Your Subscriptions for {dest_label} ({len(subs)}):</b>\n"
+        )
+        lines = [header]
         for s in subs:
             title = html.escape(s.get("title") or "Untitled Feed")
             url = html.escape(s.get("url", ""))
             fid = s["feed_id"]
             checked = s.get("last_checked") or "Not yet checked"
             tid = s.get("thread_id")
+            sub_uid = s.get("user_id")
 
             topic_badge = f" [Topic: <code>#{tid}</code>]" if tid else ""
             lines.append(f"• <b>[{fid}] {title}</b>{topic_badge}")
             lines.append(f"  🔗 <code>{url}</code>")
+            if filter_user_id is None and sub_uid:
+                lines.append(f"  👤 <i>Subscriber ID: <code>{sub_uid}</code></i>")
             if s.get("filter_keywords"):
                 lines.append(
                     f"  🔍 <i>Include: {html.escape(s['filter_keywords'])}</i>"
@@ -418,7 +560,7 @@ class TelegramBotService:
     async def cmd_remove(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Unsubscribe from a feed."""
+        """Unsubscribe from a feed with ownership verification."""
         if not await self.check_authorization(update, context):
             return
 
@@ -431,6 +573,10 @@ class TelegramBotService:
             )
             return
 
+        user = update.effective_user
+        user_id = user.id if user else 0
+        is_admin = await self.is_admin_or_super(update)
+
         feed_identifier = context.args[0].strip()
         target_arg = context.args[1] if len(context.args) > 1 else None
 
@@ -440,18 +586,29 @@ class TelegramBotService:
         if not target_id:
             return
 
-        removed_name = await self.db.unsubscribe(
-            "telegram", target_id, feed_identifier, thread_id=thread_id
+        removed_name, status = await self.db.unsubscribe(
+            "telegram",
+            target_id,
+            feed_identifier,
+            thread_id=thread_id,
+            user_id=user_id,
+            is_admin=is_admin,
         )
 
         dest_str = html.escape(target_title)
         if thread_id:
             dest_str += f" [Topic: #{thread_id}]"
 
-        if removed_name:
+        if status == "success":
             await update.effective_message.reply_html(
                 f"🗑 <b>Removed subscription:</b>\n"
-                f"<b>{html.escape(removed_name)}</b> has been unsubscribed from {dest_str}."
+                f"<b>{html.escape(removed_name or feed_identifier)}</b> has been unsubscribed from {dest_str}."
+            )
+        elif status == "permission_denied":
+            await update.effective_message.reply_html(
+                f"⛔ <b>Permission Denied:</b> Feed <b>{html.escape(removed_name or feed_identifier)}</b> "
+                f"was subscribed by another user in {dest_str}.\n\n"
+                "You can only remove feeds you added. Group Admins and Bot Owners can remove any feed."
             )
         else:
             await update.effective_message.reply_html(
@@ -478,6 +635,10 @@ class TelegramBotService:
                 "<i>To clear filters:</i> /filter 1 clear"
             )
             return
+
+        user = update.effective_user
+        user_id = user.id if user else 0
+        is_admin = await self.is_admin_or_super(update)
 
         feed_id_str = context.args[0].strip()
         if not feed_id_str.isdigit():
@@ -516,24 +677,31 @@ class TelegramBotService:
                 elif part.lower().startswith("exc="):
                     exc_val = part[4:].strip()
 
-        success = await self.db.update_filters(
+        status = await self.db.update_filters(
             platform="telegram",
             target_id=target_id,
             feed_id=int(feed_id_str),
             filter_keywords=inc_val,
             filter_exclude=exc_val,
             thread_id=thread_id,
+            user_id=user_id,
+            is_admin=is_admin,
         )
 
         dest_str = html.escape(target_title)
         if thread_id:
             dest_str += f" [Topic: #{thread_id}]"
 
-        if success:
+        if status == "success":
             await update.effective_message.reply_html(
                 f"✅ <b>Filter updated for Feed #{feed_id_str} ({dest_str})!</b>\n"
                 f"• Include: <code>{html.escape(inc_val or 'Any')}</code>\n"
                 f"• Exclude: <code>{html.escape(exc_val or 'None')}</code>"
+            )
+        elif status == "permission_denied":
+            await update.effective_message.reply_html(
+                f"⛔ <b>Permission Denied:</b> Feed #{feed_id_str} in {dest_str} was added by another user.\n\n"
+                "You can only customize filter rules for feeds you subscribed to."
             )
         else:
             await update.effective_message.reply_html(

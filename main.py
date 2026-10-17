@@ -50,6 +50,11 @@ SUDO_USERS = _parse_id_list(
     or getattr(config, "SUDO_USERS", [])
     or getattr(config, "AUTHORIZED_USERS", [])
 )
+MAX_FEEDS_PER_USER = int(
+    os.environ.get("MAX_FEEDS_PER_USER")
+    or getattr(config, "MAX_FEEDS_PER_USER", 25)
+    or 25
+)
 
 if sys.platform == "win32":
     try:
@@ -141,6 +146,7 @@ async def main() -> None:
             owner_id=OWNER_ID,
             authorized_chats=AUTHORIZED_CHATS,
             sudo_users=SUDO_USERS,
+            max_feeds_per_user=MAX_FEEDS_PER_USER,
         )
     else:
         logger.info("Telegram Bot is disabled (BOT_TOKEN not provided).")

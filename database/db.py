@@ -36,7 +36,27 @@ class Database:
         await self.db.feeds.create_index([("feed_id", ASCENDING)], unique=True)
         await self.db.feeds.create_index([("is_active", ASCENDING)])
 
-        # 2. Subscriptions collection indexes (includes thread_id for topic support)
+        # 2. Subscriptions collection indexes (includes thread_id and user_id for isolation)
+        try:
+            # Check existing indexes to drop legacy unique index if needed
+            index_info = await self.db.subscriptions.index_information()
+            for idx_name, idx_meta in index_info.items():
+                if idx_name == "_id_":
+                    continue
+                keys = idx_meta.get("key", [])
+                key_names = [k[0] for k in keys]
+                if (
+                    idx_meta.get("unique")
+                    and "user_id" not in key_names
+                    and "feed_id" in key_names
+                ):
+                    logger.info(
+                        "Dropping legacy subscriptions unique index: %s", idx_name
+                    )
+                    await self.db.subscriptions.drop_index(idx_name)
+        except Exception as e:
+            logger.debug("Index migration check note: %s", e)
+
         try:
             await self.db.subscriptions.create_index(
                 [
@@ -44,14 +64,17 @@ class Database:
                     ("platform", ASCENDING),
                     ("target_id", ASCENDING),
                     ("thread_id", ASCENDING),
+                    ("user_id", ASCENDING),
                 ],
                 unique=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Could not create subscriptions unique index: %s", e)
+
         await self.db.subscriptions.create_index(
-            [("platform", ASCENDING), ("target_id", ASCENDING)]
+            [("platform", ASCENDING), ("target_id", ASCENDING), ("user_id", ASCENDING)]
         )
+        await self.db.subscriptions.create_index([("user_id", ASCENDING)])
 
         # 3. Seen items collection indexes with TTL auto-expiration (14 days)
         await self.db.seen_items.create_index(
@@ -113,9 +136,10 @@ class Database:
         filter_keywords: Optional[str] = None,
         filter_exclude: Optional[str] = None,
         thread_id: Optional[int] = None,
+        user_id: Optional[int] = None,
     ) -> Tuple[int, str, bool]:
         """
-        Subscribe a target (chat, channel, or topic) to a feed.
+        Subscribe a target (chat, channel, topic, and user) to a feed.
         Returns (feed_id, feed_title, is_new_subscription).
         """
         feed_id, feed_title = await self.add_or_get_feed(url, title)
@@ -127,6 +151,7 @@ class Database:
             "platform": platform,
             "target_id": target_id,
             "thread_id": thread_id,
+            "user_id": user_id,
         }
         existing = await self.db.subscriptions.find_one(sub_query)
 
@@ -148,6 +173,7 @@ class Database:
             "platform": platform,
             "target_id": target_id,
             "thread_id": thread_id,
+            "user_id": user_id,
             "filter_keywords": filter_keywords,
             "filter_exclude": filter_exclude,
             "created_at": datetime.now(timezone.utc),
@@ -169,10 +195,12 @@ class Database:
         target_id: str,
         feed_identifier: str,
         thread_id: Optional[int] = None,
-    ) -> Optional[str]:
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> Tuple[Optional[str], str]:
         """
-        Unsubscribe a target by feed ID or feed URL/title.
-        Returns the removed feed title/url if found, or None.
+        Unsubscribe a target by feed ID or feed URL/title with ownership verification.
+        Returns (feed_label, status_code) where status_code is 'success', 'permission_denied', or 'not_found'.
         """
         target_id = str(target_id)
         platform = platform.lower()
@@ -192,25 +220,53 @@ class Database:
             )
 
         if not feed_doc:
-            return None
+            return None, "not_found"
 
         feed_id = feed_doc["feed_id"]
         feed_label = feed_doc.get("title") or feed_doc.get("url")
 
-        del_query = {
+        base_query = {
             "feed_id": feed_id,
             "platform": platform,
             "target_id": target_id,
         }
         if thread_id is not None:
-            del_query["thread_id"] = thread_id
+            base_query["thread_id"] = thread_id
+
+        # Find all subscriptions matching this feed in this target
+        existing_subs = await self.db.subscriptions.find(base_query).to_list(length=100)
+        if not existing_subs:
+            return None, "not_found"
+
+        # Check ownership unless caller has admin/owner privileges or is in private chat
+        is_private = (user_id is not None) and (str(target_id) == str(user_id))
+        if not is_admin and not is_private and user_id is not None:
+            user_sub = next(
+                (s for s in existing_subs if s.get("user_id") == user_id), None
+            )
+            if not user_sub:
+                # Feed exists in this chat, but belongs to another user
+                return feed_label, "permission_denied"
+            del_query = {"_id": user_sub["_id"]}
+        else:
+            # Admin or private chat: delete user's sub if matched, otherwise first sub in target
+            if user_id is not None:
+                user_sub = next(
+                    (s for s in existing_subs if s.get("user_id") == user_id), None
+                )
+                del_query = (
+                    {"_id": user_sub["_id"]}
+                    if user_sub
+                    else {"_id": existing_subs[0]["_id"]}
+                )
+            else:
+                del_query = {"_id": existing_subs[0]["_id"]}
 
         res = await self.db.subscriptions.delete_one(del_query)
-
         if res.deleted_count == 0:
-            return None
+            return None, "not_found"
 
-        # If no subscribers left for this feed, mark inactive
+        # If no subscribers left across all targets for this feed, mark inactive
         active_sub_count = await self.db.subscriptions.count_documents(
             {"feed_id": feed_id}
         )
@@ -219,7 +275,7 @@ class Database:
                 {"feed_id": feed_id}, {"$set": {"is_active": False}}
             )
 
-        return feed_label
+        return feed_label, "success"
 
     async def update_filters(
         self,
@@ -229,8 +285,13 @@ class Database:
         filter_keywords: Optional[str] = None,
         filter_exclude: Optional[str] = None,
         thread_id: Optional[int] = None,
-    ) -> bool:
-        """Update keyword filter rules for a specific subscription."""
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> str:
+        """
+        Update keyword filter rules for a specific subscription.
+        Returns 'success', 'permission_denied', or 'not_found'.
+        """
         target_id = str(target_id)
         platform = platform.lower()
 
@@ -241,35 +302,76 @@ class Database:
             update_fields["filter_exclude"] = filter_exclude
 
         if not update_fields:
-            return False
+            return "not_found"
 
-        upd_query = {
+        base_query = {
             "platform": platform,
             "target_id": target_id,
             "feed_id": feed_id,
         }
         if thread_id is not None:
-            upd_query["thread_id"] = thread_id
+            base_query["thread_id"] = thread_id
+
+        existing_subs = await self.db.subscriptions.find(base_query).to_list(length=100)
+        if not existing_subs:
+            return "not_found"
+
+        is_private = (user_id is not None) and (str(target_id) == str(user_id))
+        if not is_admin and not is_private and user_id is not None:
+            user_sub = next(
+                (s for s in existing_subs if s.get("user_id") == user_id), None
+            )
+            if not user_sub:
+                return "permission_denied"
+            upd_query = {"_id": user_sub["_id"]}
+        else:
+            if user_id is not None:
+                user_sub = next(
+                    (s for s in existing_subs if s.get("user_id") == user_id), None
+                )
+                upd_query = (
+                    {"_id": user_sub["_id"]}
+                    if user_sub
+                    else {"_id": existing_subs[0]["_id"]}
+                )
+            else:
+                upd_query = {"_id": existing_subs[0]["_id"]}
 
         res = await self.db.subscriptions.update_one(
             upd_query,
             {"$set": update_fields},
         )
-        return res.modified_count > 0 or res.matched_count > 0
+        return (
+            "success"
+            if (res.modified_count > 0 or res.matched_count > 0)
+            else "not_found"
+        )
 
     async def list_subscriptions(
         self,
         platform: str,
         target_id: str,
         thread_id: Optional[int] = None,
+        user_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """List all feeds subscribed by a specific chat, channel, or topic."""
+        """List feeds subscribed by chat, topic, and optionally filtered by user_id."""
         target_id = str(target_id)
         platform = platform.lower()
 
-        match_cond = {"platform": platform, "target_id": target_id}
+        match_cond: Dict[str, Any] = {"platform": platform, "target_id": target_id}
         if thread_id is not None:
             match_cond["thread_id"] = thread_id
+
+        if user_id is not None:
+            if str(target_id) == str(user_id):
+                # In user's private DM, include their subscriptions even if user_id is legacy/null
+                match_cond["$or"] = [
+                    {"user_id": user_id},
+                    {"user_id": None},
+                    {"user_id": {"$exists": False}},
+                ]
+            else:
+                match_cond["user_id"] = user_id
 
         pipeline = [
             {"$match": match_cond},
@@ -291,6 +393,7 @@ class Database:
                     "filter_keywords": "$filter_keywords",
                     "filter_exclude": "$filter_exclude",
                     "thread_id": "$thread_id",
+                    "user_id": "$user_id",
                     "created_at": "$created_at",
                 }
             },
@@ -299,6 +402,46 @@ class Database:
 
         cursor = self.db.subscriptions.aggregate(pipeline)
         return await cursor.to_list(length=500)
+
+    async def list_user_all_subscriptions(self, user_id: int) -> List[Dict[str, Any]]:
+        """List all subscriptions across all platforms and targets for a specific user."""
+        if not user_id:
+            return []
+        pipeline = [
+            {"$match": {"user_id": user_id}},
+            {
+                "$lookup": {
+                    "from": "feeds",
+                    "localField": "feed_id",
+                    "foreignField": "feed_id",
+                    "as": "feed_info",
+                }
+            },
+            {"$unwind": "$feed_info"},
+            {
+                "$project": {
+                    "feed_id": "$feed_id",
+                    "url": "$feed_info.url",
+                    "title": "$feed_info.title",
+                    "platform": "$platform",
+                    "target_id": "$target_id",
+                    "thread_id": "$thread_id",
+                    "filter_keywords": "$filter_keywords",
+                    "filter_exclude": "$filter_exclude",
+                    "last_checked": "$feed_info.last_checked",
+                    "created_at": "$created_at",
+                }
+            },
+            {"$sort": {"feed_id": ASCENDING}},
+        ]
+        cursor = self.db.subscriptions.aggregate(pipeline)
+        return await cursor.to_list(length=500)
+
+    async def count_user_subscriptions(self, user_id: int) -> int:
+        """Count total active subscriptions added by a specific user across all chats."""
+        if not user_id:
+            return 0
+        return await self.db.subscriptions.count_documents({"user_id": user_id})
 
     async def get_active_feeds(self) -> List[Dict[str, Any]]:
         """Return all active feeds that have at least one subscriber."""

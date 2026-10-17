@@ -16,6 +16,9 @@ SUDO_USERS = []  # List of additional Telegram User IDs authorized to manage fee
 # ==============================================================================
 DISCORD_BOT_TOKEN = ""  # Discord Bot token (optional if running Telegram-only)
 POLL_INTERVAL_SECONDS = 120  # Feed check frequency in seconds (default: 2 min)
+MAX_FEEDS_PER_USER = (
+    25  # Maximum active feed subscriptions allowed per user (0 = unlimited)
+)
 INITIAL_ITEMS_TO_ALERT = (
     0  # How many existing items to alert on first add (0 = only new uploads)
 )
