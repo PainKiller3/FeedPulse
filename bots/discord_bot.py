@@ -1,5 +1,6 @@
 import logging
-from typing import Optional
+import shlex
+from typing import Optional, List, Tuple
 import aiohttp
 import discord
 from discord import app_commands
@@ -58,6 +59,108 @@ class DiscordBotService:
                 self.bot.user.id,
                 len(self.bot.guilds),
             )
+
+    @staticmethod
+    def _parse_tokens(
+        args: List[str],
+    ) -> Tuple[
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        bool,
+        Optional[int],
+        Optional[int],
+    ]:
+        url = None
+        inf = None
+        exf = None
+        case_sensitive = False
+        max_size = None
+        min_size = None
+        title_words = []
+
+        rem = list(args)
+        i = 0
+        while i < len(rem):
+            tok = rem[i].lower()
+            if rem[i].startswith("http://") or rem[i].startswith("https://"):
+                url = rem[i].strip("<>")
+                i += 1
+                continue
+            elif tok in ("-inf", "--inf", "-inc", "--inc"):
+                i += 1
+                collected = []
+                while i < len(rem) and not rem[i].startswith("-"):
+                    collected.append(rem[i])
+                    i += 1
+                inf = " ".join(collected)
+                continue
+            elif tok.startswith(("inc=", "inf=")):
+                inf = rem[i].split("=", 1)[1]
+                i += 1
+                continue
+            elif tok in ("-exf", "--exf", "-exc", "--exc"):
+                i += 1
+                collected = []
+                while i < len(rem) and not rem[i].startswith("-"):
+                    collected.append(rem[i])
+                    i += 1
+                exf = " ".join(collected)
+                continue
+            elif tok.startswith(("exc=", "exf=")):
+                exf = rem[i].split("=", 1)[1]
+                i += 1
+                continue
+            elif tok in ("-stv", "--stv", "-cs", "--cs"):
+                i += 1
+                if i < len(rem) and rem[i].lower() in (
+                    "true",
+                    "1",
+                    "yes",
+                    "false",
+                    "0",
+                    "no",
+                ):
+                    case_sensitive = rem[i].lower() in ("true", "1", "yes")
+                    i += 1
+                else:
+                    case_sensitive = True
+                continue
+            elif tok.startswith(("stv=", "cs=")):
+                case_sensitive = rem[i].split("=", 1)[1].lower() in (
+                    "true",
+                    "1",
+                    "yes",
+                )
+                i += 1
+                continue
+            elif tok in ("-maxsize", "--maxsize", "-max", "--max"):
+                i += 1
+                if i < len(rem):
+                    max_size = parse_size_bytes(rem[i])
+                    i += 1
+                continue
+            elif tok.startswith(("maxsize=", "max=")):
+                max_size = parse_size_bytes(rem[i].split("=", 1)[1])
+                i += 1
+                continue
+            elif tok in ("-minsize", "--minsize", "-min", "--min"):
+                i += 1
+                if i < len(rem):
+                    min_size = parse_size_bytes(rem[i])
+                    i += 1
+                continue
+            elif tok.startswith(("minsize=", "min=")):
+                min_size = parse_size_bytes(rem[i].split("=", 1)[1])
+                i += 1
+                continue
+            elif not url:
+                title_words.append(rem[i])
+            i += 1
+
+        custom_title = " ".join(title_words).strip() or None
+        return url, custom_title, inf, exf, case_sensitive, max_size, min_size
 
     def _setup_slash_commands(self) -> None:
         """Register Discord Slash Application Commands (/add, /list, etc.)."""
@@ -204,6 +307,92 @@ class DiscordBotService:
             except Exception as e:
                 logger.error("Error in /add command: %s", e)
                 await interaction.followup.send(f"❌ Error adding feed: {e}")
+
+        @self.bot.tree.command(
+            name="batchadd",
+            description="Subscribe this channel to multiple RSS feeds at once (one per line)",
+        )
+        @app_commands.describe(
+            feeds="Multiple feed subscriptions, one per line (e.g. Title https://... -inf ...)",
+        )
+        async def slash_batchadd(interaction: discord.Interaction, feeds: str):
+            await interaction.response.defer(thinking=True)
+            lines = [line.strip() for line in feeds.splitlines() if line.strip()]
+            if not lines:
+                await interaction.followup.send(
+                    "⚠️ Please provide at least one feed line."
+                )
+                return
+
+            results = []
+            added_count = 0
+            channel_id = str(interaction.channel_id)
+
+            async with aiohttp.ClientSession() as session:
+                for idx, line in enumerate(lines, 1):
+                    try:
+                        tokens = shlex.split(line)
+                    except ValueError:
+                        tokens = line.split()
+
+                    (
+                        url,
+                        custom_title,
+                        inf,
+                        exf,
+                        case_sensitive,
+                        max_size,
+                        min_size,
+                    ) = self._parse_tokens(tokens)
+                    if not url:
+                        results.append(
+                            f"❌ **#{idx}:** No valid URL found in `{line[:35]}...`"
+                        )
+                        continue
+
+                    try:
+                        (
+                            title,
+                            etag,
+                            modified,
+                            items,
+                            status,
+                        ) = await FeedParser.fetch_and_parse(session, url)
+                        if status != 200 or not items:
+                            results.append(
+                                f"❌ **#{idx}:** Failed to load feed (HTTP {status}) from `<{url[:30]}...>`"
+                            )
+                            continue
+
+                        feed_title = custom_title or title or url
+                        feed_id, effective_title, is_new = await self.db.subscribe(
+                            platform="discord",
+                            target_id=channel_id,
+                            url=url,
+                            title=feed_title,
+                            filter_keywords=inf,
+                            filter_exclude=exf,
+                            case_sensitive=case_sensitive,
+                            max_size=max_size,
+                            min_size=min_size,
+                        )
+                        added_count += 1
+                        status_icon = "✅" if is_new else "ℹ️"
+                        results.append(
+                            f"{status_icon} **#{idx}:** **{effective_title}** (`#{feed_id}`)"
+                        )
+                    except Exception as e:
+                        results.append(f"❌ **#{idx}:** Error: {e}")
+
+            if added_count > 0:
+                self.poller.trigger_immediate_check()
+
+            embed = discord.Embed(
+                title=f"📦 Batch Subscription Results ({added_count}/{len(lines)} added)",
+                description="\n".join(results[:25]),
+                color=0x2ECC71 if added_count > 0 else 0xE74C3C,
+            )
+            await interaction.followup.send(embed=embed)
 
         @self.bot.tree.command(
             name="list", description="List feeds monitored in this channel"
@@ -602,105 +791,124 @@ class DiscordBotService:
                 "⚡ Use `/help` for interactive slash commands or `!add <url>` to subscribe."
             )
 
-        @self.bot.command(name="add")
+        @self.bot.command(name="add", aliases=["batchadd"])
         async def prefix_add(ctx: commands.Context, *args):
-            if not args:
+            raw_text = ctx.message.content
+            lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+            if lines and (
+                lines[0].lower().startswith("!add")
+                or lines[0].lower().startswith("!batchadd")
+            ):
+                first_parts = lines[0].split(maxsplit=1)
+                if len(first_parts) > 1:
+                    lines[0] = first_parts[1].strip()
+                else:
+                    lines.pop(0)
+
+            if not lines:
                 await ctx.send(
-                    "⚠️ Usage: `!add <feed_url> [-inf <include>] [-exf <exclude>] [-maxsize <size>] [-minsize <size>] [-stv]`"
+                    "⚠️ Usage: `!add <feed_url> [-inf <include>] [-exf <exclude>] [-maxsize <size>] [-minsize <size>] [-stv]`\n"
+                    "Or multi-line for batch addition!"
                 )
                 return
 
-            url = None
-            inf = None
-            exf = None
-            case_sensitive = False
-            max_size = None
-            min_size = None
+            channel_id = str(ctx.channel.id)
 
-            rem = list(args)
-            for idx, a in enumerate(rem):
-                if a.startswith("http://") or a.startswith("https://"):
-                    url = a
-                    rem = rem[:idx] + rem[idx + 1 :]
-                    break
+            if len(lines) > 1:
+                status_msg = await ctx.send(
+                    f"⏳ *Processing batch subscription of {len(lines)} feeds...*"
+                )
+                results = []
+                added_count = 0
+
+                async with aiohttp.ClientSession() as session:
+                    for idx, line in enumerate(lines, 1):
+                        try:
+                            tokens = shlex.split(line)
+                        except ValueError:
+                            tokens = line.split()
+
+                        (
+                            url,
+                            custom_title,
+                            inf,
+                            exf,
+                            case_sensitive,
+                            max_size,
+                            min_size,
+                        ) = self._parse_tokens(tokens)
+
+                        if not url:
+                            results.append(
+                                f"❌ **#{idx}:** No valid URL found in `{line[:35]}...`"
+                            )
+                            continue
+
+                        try:
+                            (
+                                title,
+                                etag,
+                                modified,
+                                items,
+                                status,
+                            ) = await FeedParser.fetch_and_parse(session, url)
+                            if status != 200 or not items:
+                                results.append(
+                                    f"❌ **#{idx}:** Failed to load feed (HTTP {status}) from `<{url[:30]}...>`"
+                                )
+                                continue
+
+                            feed_title = custom_title or title or url
+                            feed_id, effective_title, is_new = await self.db.subscribe(
+                                platform="discord",
+                                target_id=channel_id,
+                                url=url,
+                                title=feed_title,
+                                filter_keywords=inf,
+                                filter_exclude=exf,
+                                case_sensitive=case_sensitive,
+                                max_size=max_size,
+                                min_size=min_size,
+                            )
+                            added_count += 1
+                            status_icon = "✅" if is_new else "ℹ️"
+                            results.append(
+                                f"{status_icon} **#{idx}:** **{effective_title}** (`#{feed_id}`)"
+                            )
+                        except Exception as e:
+                            results.append(f"❌ **#{idx}:** Error: {e}")
+
+                if added_count > 0:
+                    self.poller.trigger_immediate_check()
+
+                embed = discord.Embed(
+                    title=f"📦 Batch Subscription Results ({added_count}/{len(lines)} added)",
+                    description="\n".join(results[:25]),
+                    color=0x2ECC71 if added_count > 0 else 0xE74C3C,
+                )
+                await status_msg.edit(content="", embed=embed)
+                return
+
+            # Single feed parsing
+            try:
+                tokens = shlex.split(lines[0])
+            except ValueError:
+                tokens = lines[0].split()
+
+            (
+                url,
+                custom_title,
+                inf,
+                exf,
+                case_sensitive,
+                max_size,
+                min_size,
+            ) = self._parse_tokens(tokens)
 
             if not url:
                 await ctx.send("❌ Please provide a valid HTTP/HTTPS URL.")
                 return
-
-            i = 0
-            while i < len(rem):
-                tok = rem[i].lower()
-                if tok in ("-inf", "--inf", "-inc", "--inc"):
-                    i += 1
-                    col = []
-                    while i < len(rem) and not rem[i].startswith("-"):
-                        col.append(rem[i])
-                        i += 1
-                    if col:
-                        inf = " ".join(col)
-                    continue
-                elif tok.startswith(("inc=", "inf=")):
-                    inf = rem[i].split("=", 1)[1]
-                    i += 1
-                    continue
-                elif tok in ("-exf", "--exf", "-exc", "--exc"):
-                    i += 1
-                    col = []
-                    while i < len(rem) and not rem[i].startswith("-"):
-                        col.append(rem[i])
-                        i += 1
-                    if col:
-                        exf = " ".join(col)
-                    continue
-                elif tok.startswith(("exc=", "exf=")):
-                    exf = rem[i].split("=", 1)[1]
-                    i += 1
-                    continue
-                elif tok in ("-stv", "--stv", "-cs", "--cs"):
-                    i += 1
-                    if i < len(rem) and rem[i].lower() in (
-                        "true",
-                        "1",
-                        "yes",
-                        "false",
-                        "0",
-                        "no",
-                    ):
-                        case_sensitive = rem[i].lower() in ("true", "1", "yes")
-                        i += 1
-                    else:
-                        case_sensitive = True
-                    continue
-                elif tok.startswith(("stv=", "cs=")):
-                    case_sensitive = rem[i].split("=", 1)[1].lower() in (
-                        "true",
-                        "1",
-                        "yes",
-                    )
-                    i += 1
-                    continue
-                elif tok in ("-maxsize", "--maxsize", "-max", "--max"):
-                    i += 1
-                    if i < len(rem):
-                        max_size = parse_size_bytes(rem[i])
-                        i += 1
-                    continue
-                elif tok.startswith(("maxsize=", "max=")):
-                    max_size = parse_size_bytes(rem[i].split("=", 1)[1])
-                    i += 1
-                    continue
-                elif tok in ("-minsize", "--minsize", "-min", "--min"):
-                    i += 1
-                    if i < len(rem):
-                        min_size = parse_size_bytes(rem[i])
-                        i += 1
-                    continue
-                elif tok.startswith(("minsize=", "min=")):
-                    min_size = parse_size_bytes(rem[i].split("=", 1)[1])
-                    i += 1
-                    continue
-                i += 1
 
             try:
                 async with aiohttp.ClientSession() as session:
@@ -718,12 +926,12 @@ class DiscordBotService:
                     )
                     return
 
-                channel_id = str(ctx.channel.id)
+                feed_title = custom_title or title or url
                 feed_id, effective_title, is_new = await self.db.subscribe(
                     platform="discord",
                     target_id=channel_id,
                     url=url,
-                    title=title or url,
+                    title=feed_title,
                     filter_keywords=inf,
                     filter_exclude=exf,
                     case_sensitive=case_sensitive,

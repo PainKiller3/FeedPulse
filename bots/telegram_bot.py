@@ -1,6 +1,7 @@
 import html
 import io
 import logging
+import shlex
 from typing import Optional, List, Set, Tuple
 import aiohttp
 from telegram import BotCommand, Update
@@ -343,14 +344,17 @@ class TelegramBotService:
         Optional[str],
         Optional[str],
         Optional[str],
+        bool,
+        Optional[int],
+        Optional[int],
     ]:
         """
         Parse flexible feed arguments supporting custom titles and -inf/-exf flags:
         /add PSA https://example.com/rss/ -inf PSA -exf 720p @channel
-        Returns (url, custom_title, target_arg, thread_arg, inc_filter, exc_filter).
+        Returns (url, custom_title, target_arg, thread_arg, inc_filter, exc_filter, case_sensitive, max_size, min_size).
         """
         if not args:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, False, None, None
 
         url = None
         url_idx = -1
@@ -362,7 +366,7 @@ class TelegramBotService:
                 break
 
         if not url or url_idx == -1:
-            return None, None, None, None, None, None, None, None, None
+            return None, None, None, None, None, None, False, None, None
 
         custom_title = " ".join(args[:url_idx]).strip() or None
 
@@ -536,13 +540,47 @@ class TelegramBotService:
         )
 
     async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Subscribe a chat, channel, or topic to an RSS feed."""
+        """Subscribe a chat, channel, or topic to one or more RSS feeds."""
         if not await self.check_authorization(update, context):
             return
 
         user = update.effective_user
         user_id = user.id if user else 0
         user_name = user.full_name or user.first_name if user else f"User {user_id}"
+
+        raw_text = update.effective_message.text or ""
+        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+        if lines:
+            first_parts = lines[0].split(maxsplit=1)
+            if first_parts and first_parts[0].lower().startswith("/add"):
+                if len(first_parts) > 1:
+                    lines[0] = first_parts[1].strip()
+                else:
+                    lines.pop(0)
+
+        if not lines:
+            await update.effective_message.reply_html(
+                "⚠️ <b>Usage:</b>\n"
+                "• <code>/add [title] &lt;feed_url&gt; [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [-maxsize &lt;size&gt;] [-minsize &lt;size&gt;] [@channel]</code>\n\n"
+                "<b>Batch Multi-Line Adding:</b>\n"
+                "You can add multiple feeds in a single message (one per line):\n"
+                "<code>/add\n"
+                "PSA https://example.com/rss1 -inf 1080p\n"
+                "4K https://example.com/rss2 -minsize 5GB\n"
+                "Anime https://example.com/rss3 -exf 720p</code>"
+            )
+            return
+
+        # If multiple lines are provided, handle as batch
+        if len(lines) > 1:
+            await self._handle_batch_add(update, context, lines, user_id, user_name)
+            return
+
+        try:
+            tokens = shlex.split(lines[0])
+        except ValueError:
+            tokens = lines[0].split()
 
         (
             url,
@@ -554,7 +592,7 @@ class TelegramBotService:
             case_sensitive,
             max_size,
             min_size,
-        ) = self._parse_add_args(context.args or [])
+        ) = self._parse_add_args(tokens)
         if not url:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
@@ -672,6 +710,154 @@ class TelegramBotService:
             logger.error("Error in /add command: %s", e)
             await status_msg.edit_text(
                 f"❌ Error while adding feed: {html.escape(str(e))}"
+            )
+
+    async def _handle_batch_add(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        lines: List[str],
+        user_id: int,
+        user_name: str,
+    ) -> None:
+        """Handle multiple feed subscriptions in a single message."""
+        status_msg = await update.effective_message.reply_html(
+            f"⏳ <i>Processing batch subscription of <b>{len(lines)}</b> feeds...</i>"
+        )
+
+        results: List[str] = []
+        raw_results: List[str] = []
+        added_count = 0
+
+        async with aiohttp.ClientSession() as session:
+            for idx, line in enumerate(lines, 1):
+                try:
+                    tokens = shlex.split(line)
+                except ValueError:
+                    tokens = line.split()
+
+                (
+                    url,
+                    custom_title,
+                    target_arg,
+                    thread_arg,
+                    inc_filter,
+                    exc_filter,
+                    case_sensitive,
+                    max_size,
+                    min_size,
+                ) = self._parse_add_args(tokens)
+
+                if not url:
+                    results.append(
+                        f"❌ <b>#{idx}:</b> No valid URL found in <code>{html.escape(line[:35])}...</code>"
+                    )
+                    raw_results.append(f"#{idx}: No valid URL found in '{line}'")
+                    continue
+
+                # Quota verification for regular users
+                if self.max_feeds_per_user > 0 and not self.is_super_user(user_id):
+                    active_count = await self.db.count_user_subscriptions(user_id)
+                    if active_count >= self.max_feeds_per_user:
+                        results.append(
+                            f"⚠️ <b>#{idx}:</b> User limit reached ({self.max_feeds_per_user} max)"
+                        )
+                        raw_results.append(f"#{idx}: Quota exceeded for user")
+                        continue
+
+                target_id, thread_id, target_title = await self._resolve_destination(
+                    update, context, target_arg, thread_arg
+                )
+                if not target_id:
+                    results.append(
+                        f"❌ <b>#{idx}:</b> Cannot access destination {html.escape(target_arg or 'current chat')}"
+                    )
+                    raw_results.append(f"#{idx}: Cannot access target destination")
+                    continue
+
+                try:
+                    (
+                        title,
+                        etag,
+                        modified,
+                        items,
+                        status,
+                    ) = await FeedParser.fetch_and_parse(session, url)
+                    if status != 200 or not items:
+                        results.append(
+                            f"❌ <b>#{idx}:</b> Failed to load feed (HTTP {status}) from <code>{html.escape(url[:30])}...</code>"
+                        )
+                        raw_results.append(f"#{idx}: HTTP {status} loading {url}")
+                        continue
+
+                    feed_title = custom_title or title or url
+                    feed_id, effective_title, is_new = await self.db.subscribe(
+                        platform="telegram",
+                        target_id=target_id,
+                        url=url,
+                        title=feed_title,
+                        thread_id=thread_id,
+                        filter_keywords=inc_filter,
+                        filter_exclude=exc_filter,
+                        user_id=user_id,
+                        custom_title=custom_title,
+                        case_sensitive=case_sensitive,
+                        max_size=max_size,
+                        min_size=min_size,
+                    )
+                    added_count += 1
+
+                    details = []
+                    if inc_filter:
+                        details.append(f"+{inc_filter}")
+                    if exc_filter:
+                        details.append(f"-{exc_filter}")
+                    if max_size:
+                        details.append(f"max:{format_bytes(max_size)}")
+                    if min_size:
+                        details.append(f"min:{format_bytes(min_size)}")
+                    extra_str = (
+                        f" [<code>{' '.join(details)}</code>]" if details else ""
+                    )
+
+                    status_icon = "✅" if is_new else "ℹ️"
+                    results.append(
+                        f"{status_icon} <b>#{idx}</b> <b>{html.escape(effective_title)}</b> (ID: <code>{feed_id}</code>){extra_str}"
+                    )
+                    raw_results.append(
+                        f"#{idx}: {effective_title} (ID: {feed_id}) -> {url}"
+                    )
+
+                except Exception as e:
+                    logger.error("Error subscribing line '%s': %s", line, e)
+                    results.append(f"❌ <b>#{idx}:</b> Error: {html.escape(str(e))}")
+                    raw_results.append(f"#{idx}: Error: {e}")
+
+        # Trigger background check for newly added feeds
+        if added_count > 0:
+            self.poller.trigger_immediate_check()
+
+        summary_header = f"📦 <b>Batch Subscription Summary ({added_count}/{len(lines)} added):</b>\n\n"
+        full_text = summary_header + "\n".join(results)
+
+        if len(full_text.encode("utf-8")) > 4000:
+            raw_output = (
+                f"Batch Subscription Summary ({added_count}/{len(lines)} added)\n"
+                + "=" * 40
+                + "\n"
+                + "\n".join(raw_results)
+            )
+            with io.BytesIO(raw_output.encode("utf-8")) as out_file:
+                out_file.name = f"batch_add_{len(lines)}_feeds.txt"
+                await update.effective_message.reply_document(
+                    document=out_file,
+                    caption=f"📦 Batch subscription finished: <b>{added_count}/{len(lines)}</b> successful",
+                    parse_mode="HTML",
+                )
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text(
+                full_text, parse_mode="HTML", disable_web_page_preview=True
             )
 
     async def cmd_myfeeds(

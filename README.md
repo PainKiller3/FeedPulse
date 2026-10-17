@@ -151,6 +151,15 @@ You can fine-tune what torrents and posts trigger alerts using rich boolean logi
   /edit 1 -maxsize none
   ```
 
+- **Batch Multi-Line Subscriptions:**
+  Add multiple feeds in a single command (one feed per line) with custom titles, filters, and size constraints:
+  ```text
+  /add
+  PSA Movies https://example.com/rss1 -inf 1080p
+  4K HDR https://example.com/rss2 -minsize 5GB
+  Anime https://example.com/rss3 -exf 720p
+  ```
+
 ---
 
 ## ☁️ Cloud Deployment (Heroku, Render, Railway, Koyeb)
