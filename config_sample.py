@@ -29,6 +29,49 @@ USER_AGENT = (
 )
 
 # ==============================================================================
+# NOTIFICATION TEMPLATES & RICH TEXT
+# ==============================================================================
+# Enable Telegram rich text (expandable blockquotes for long magnets, sleek metadata cards).
+# Default: True. Can also be toggled per-chat via /richtext or in /menu.
+ENABLE_RICH_TEXT = True
+
+# Custom Telegram Notification Templates
+# Available Variables:
+#   {title}         - Clean item title (automatically HTML-escaped)
+#   {feed_title}    - Name or title of the feed (automatically HTML-escaped)
+#   {size}          - Formatted file size (e.g. "4.80 GB")
+#   {category}      - Item category / genre
+#   {seeds}         - Seeder count (or "?")
+#   {leechers}      - Leecher count (or "?")
+#   {magnet}        - Full magnet URI
+#   {torrent_url}   - Direct link to .torrent file
+#   {link}          - Web page / details URL
+#   {published}     - Publication date string
+#   {resolution}    - Extracted resolution (e.g. "1080p", "2160p")
+#   {codec}         - Extracted video codec (e.g. "HEVC", "x264")
+#   {year}          - Extracted release year (e.g. "2024")
+#   {description}   - Feed summary or description text (HTML-escaped)
+#   {meta_card}     - Formatted metadata card (Category, Size, Seeds/Leechers)
+#   {magnet_block}  - Formatted magnet block (expandable in rich text mode)
+
+# Default Torrent Alert Template (replicates built-in design):
+TORRENT_ALERT_TEMPLATE = """⚡ <b>New Torrent Uploaded!</b>
+📡 <i>{feed_title}</i>
+
+🎬 <b>{title}</b>
+
+{meta_card}
+{magnet_block}"""
+
+# Default RSS / Article Alert Template:
+FEED_ALERT_TEMPLATE = """📰 <b>New Feed Post:</b>
+📡 <i>{feed_title}</i>
+
+📝 <b>{title}</b>
+
+📅 <i>{published}</i>"""
+
+# ==============================================================================
 # DEFAULT TRACKERS (for Magnet link generation)
 # ==============================================================================
 DEFAULT_TRACKERS = [

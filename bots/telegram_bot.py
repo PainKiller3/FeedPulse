@@ -116,6 +116,15 @@ class TelegramBotService:
         except Exception as e:
             logger.warning("Could not load authorizations from database: %s", e)
 
+        # Load rich text chat settings
+        try:
+            rt_settings = await self.db.get_all_chat_settings("rich_text")
+            if rt_settings:
+                self.dispatcher.set_rich_text_overrides(rt_settings)
+                logger.info("Loaded rich text settings for %d chats", len(rt_settings))
+        except Exception as e:
+            logger.warning("Could not load rich text settings from database: %s", e)
+
         # Register command handlers
         self.application.add_handler(CommandHandler(["start", "help"], self.cmd_help))
         self.application.add_handler(
@@ -152,11 +161,19 @@ class TelegramBotService:
         )
         self.application.add_handler(CommandHandler("addsudo", self.cmd_addsudo))
         self.application.add_handler(CommandHandler("rmsudo", self.cmd_rmsudo))
+        self.application.add_handler(
+            CommandHandler(["richtext", "rt"], self.cmd_richtext)
+        )
         self.application.add_handler(CommandHandler("check", self.cmd_check))
         self.application.add_handler(CommandHandler("test", self.cmd_test))
         self.application.add_handler(
             CallbackQueryHandler(self.handle_menu_callback, pattern="^rss_")
         )
+
+        async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+            logger.error("Telegram application error: %s", context.error)
+
+        self.application.add_error_handler(on_error)
 
         await self.application.initialize()
         await self.application.start()
@@ -180,6 +197,7 @@ class TelegramBotService:
             BotCommand("edit", "Edit a feed subscription in-place"),
             BotCommand("remove", "Unsubscribe from a feed"),
             BotCommand("filter", "Configure keyword filters (inc=/exc=)"),
+            BotCommand("richtext", "Toggle expandable rich text formatting (/rt)"),
             BotCommand("authorize", "Authorize a user, chat, or topic (/a)"),
             BotCommand("unauthorize", "Revoke authorization (/ua)"),
             BotCommand("authlist", "View all authorized users and chats"),
@@ -374,6 +392,7 @@ class TelegramBotService:
             "✏️ /edit &lt;id&gt; [-title &lt;name&gt;] [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [-url &lt;new_url&gt;] — Edit feed in-place\n"
             "➖ /remove &lt;id&gt; [chat/channel] — Unsubscribe from a feed\n"
             "🔍 /filter &lt;id&gt; -inf &lt;words&gt; -exf &lt;words&gt; — Keyword filters\n"
+            "🎨 /richtext [on/off] — Toggle expandable quotes & rich cards (/rt)\n"
             "🔄 /check — Force an immediate feed check\n"
             "🧪 /test [chat/channel] — Preview sample torrent notification\n"
             "🆔 /id — Display Chat ID, Topic ID, and your User ID\n\n"
@@ -2060,6 +2079,9 @@ class TelegramBotService:
             "<i>Select an action below to manage feeds interactively:</i>"
         )
 
+        is_rt = self.dispatcher.is_rich_text_enabled(str(chat_id))
+        rt_btn_text = "🎨 Rich Text: ON 🟢" if is_rt else "🎨 Rich Text: OFF ⚪"
+
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -2081,16 +2103,21 @@ class TelegramBotService:
             ],
             [
                 InlineKeyboardButton(
-                    "🔄 Check Now", callback_data=f"rss_check_{user_id}"
+                    rt_btn_text, callback_data=f"rss_toggle_rt_{user_id}"
                 ),
                 InlineKeyboardButton(
-                    "🧪 Test Alert", callback_data=f"rss_test_{user_id}"
+                    "🔄 Check Now", callback_data=f"rss_check_{user_id}"
                 ),
             ],
             [
                 InlineKeyboardButton(
+                    "🧪 Test Alert", callback_data=f"rss_test_{user_id}"
+                ),
+                InlineKeyboardButton(
                     "ℹ️ Help & Guide", callback_data=f"rss_help_{user_id}"
                 ),
+            ],
+            [
                 InlineKeyboardButton("❌ Close", callback_data=f"rss_close_{user_id}"),
             ],
         ]
@@ -2125,13 +2152,16 @@ class TelegramBotService:
             return
 
         parts = query.data.split("_")
-        # format: rss_<action>_<creator_user_id>
+        # format: rss_<action>_<creator_user_id> or rss_toggle_rt_<creator_user_id>
         if len(parts) < 3:
             await query.answer()
             return
 
         action = parts[1]
-        creator_id = int(parts[2]) if parts[2].isdigit() else 0
+        if action == "toggle" and len(parts) > 3 and parts[2] == "rt":
+            creator_id = int(parts[3]) if parts[3].isdigit() else 0
+        else:
+            creator_id = int(parts[2]) if parts[2].isdigit() else 0
         user = update.effective_user
         user_id = user.id if user else 0
         chat = update.effective_chat
@@ -2195,6 +2225,27 @@ class TelegramBotService:
             )
             return
 
+        elif action == "toggle":
+            cur_rt = self.dispatcher.is_rich_text_enabled(str(chat_id))
+            new_rt = not cur_rt
+            await self.db.set_chat_setting(str(chat_id), "rich_text", new_rt)
+            self.dispatcher.set_rich_text(str(chat_id), new_rt)
+            status_text = "Enabled 🟢" if new_rt else "Disabled ⚪"
+            await query.answer(f"🎨 Rich Text {status_text} for this chat!")
+            text, reply_markup = await self._build_main_menu(
+                creator_id, chat_id, chat_title
+            )
+            try:
+                await query.edit_message_text(
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+
         elif action == "test":
             await query.answer("🧪 Generating sample alert...")
             sample_item = FeedItem(
@@ -2214,13 +2265,13 @@ class TelegramBotService:
                     "Ubuntu 24.04 LTS Desktop (64-bit)",
                 ),
             )
-            text, reply_markup = self.dispatcher.format_telegram_message(
-                sample_item, "Sample RSS Feed (Preview)"
-            )
-            await query.message.reply_html(
-                text,
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
+            is_topic = getattr(query.message, "is_topic_message", False)
+            thread_id = query.message.message_thread_id if is_topic else None
+            await self.dispatcher.send_telegram(
+                str(chat_id),
+                sample_item,
+                "Sample RSS Feed (Preview)",
+                thread_id=thread_id,
             )
             return
 
@@ -2734,4 +2785,61 @@ class TelegramBotService:
         self.sudo_users.discard(target_id)
         await update.effective_message.reply_html(
             f"🚫 <b>Sudo User Removed:</b> <code>{target_id}</code> is no longer a superuser."
+        )
+
+    # ---------------- Rich Text Configuration ----------------
+
+    async def cmd_richtext(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Toggle or view rich text formatting for the current chat (/richtext or /rt)."""
+        if not await self.check_authorization(update, context):
+            return
+
+        chat = update.effective_chat
+        if not chat:
+            return
+        chat_id = str(chat.id)
+
+        if not context.args:
+            cur = self.dispatcher.is_rich_text_enabled(chat_id)
+            state_str = (
+                "🟢 <b>Enabled</b> (Expandable magnet blockquotes & metadata cards)"
+                if cur
+                else "⚪ <b>Disabled</b> (Standard clean layout)"
+            )
+            await update.effective_message.reply_html(
+                f"🎨 <b>Rich Text Status for this chat:</b> {state_str}\n\n"
+                "To configure:\n"
+                "• <code>/richtext on</code> — Enable rich text formatting\n"
+                "• <code>/richtext off</code> — Disable rich text formatting\n"
+                "• <code>/richtext toggle</code> — Toggle setting\n"
+                "• Or toggle anytime using the <b>/menu</b> button!"
+            )
+            return
+
+        arg = context.args[0].lower().strip()
+        if arg in ("on", "enable", "1", "true"):
+            new_val = True
+        elif arg in ("off", "disable", "0", "false"):
+            new_val = False
+        elif arg in ("toggle", "flip"):
+            new_val = not self.dispatcher.is_rich_text_enabled(chat_id)
+        else:
+            await update.effective_message.reply_html(
+                "⚠️ Invalid option. Use <code>/richtext on</code>, <code>/richtext off</code>, or <code>/richtext toggle</code>."
+            )
+            return
+
+        await self.db.set_chat_setting(chat_id, "rich_text", new_val)
+        self.dispatcher.set_rich_text(chat_id, new_val)
+
+        state_label = (
+            "🟢 <b>Enabled</b> (Expandable magnet blockquotes & metadata cards)"
+            if new_val
+            else "⚪ <b>Disabled</b> (Standard clean layout)"
+        )
+        await update.effective_message.reply_html(
+            f"🎨 <b>Rich Text updated!</b>\n\n"
+            f"Current state for this chat: {state_label}"
         )

@@ -33,6 +33,7 @@ Both **Telegram** and **Discord** (slash commands + prefix `!`) support the exac
 | `/edit <id>` | Edit a feed in-place (title, filters, or URL) | `/edit 1 -title PSA -inf 1080p` |
 | `/remove <id>` | Unsubscribe and stop monitoring a feed | `/remove 1` |
 | `/filter <id> <rules>` | Configure keyword inclusion/exclusion rules | `/filter 1 inc=1080p,flac exc=cam,sample` |
+| `/richtext [on/off]` | Toggle expandable quotes & rich cards (`/rt`) | `/richtext on` or `/rt toggle` |
 | `/authorize <id>` | Authorize a user, chat, or forum topic (`/a`) | `/a -1001234567890` or `/a 12345` |
 | `/unauthorize <id>` | Revoke authorization for a user or chat (`/ua`) | `/ua -1001234567890` |
 | `/authlist` | View all authorized users, chats, and topics | `/authlist` |
@@ -211,6 +212,19 @@ docker-compose up -d
 # Check logs
 docker-compose logs -f
 ```
+
+---
+
+## 🎨 Custom Notification Templates & Rich Text
+
+FeedPulse features customizable alert templates with modern Telegram rich text (expandable magnet blockquotes and styled metadata cards):
+
+* **Global Setting (`config.py`)**: Set `ENABLE_RICH_TEXT = True` or customize `TORRENT_ALERT_TEMPLATE` and `FEED_ALERT_TEMPLATE`.
+* **Per-Chat Control**: Admins can toggle rich text anytime using `/richtext on`, `/richtext off`, or the interactive **`[ 🎨 Rich Text ]`** button inside `/menu`.
+* **Safe Fallback**: If a custom template contains broken HTML tags, FeedPulse automatically catches the error and safely falls back to the built-in template so notifications are never dropped.
+
+Available template variables:
+`{title}`, `{feed_title}`, `{size}`, `{category}`, `{seeds}`, `{leechers}`, `{magnet}`, `{torrent_url}`, `{link}`, `{published}`, `{resolution}`, `{codec}`, `{year}`, `{description}`, `{meta_card}`, `{magnet_block}`.
 
 ---
 

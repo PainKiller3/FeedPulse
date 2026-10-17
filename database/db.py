@@ -110,6 +110,11 @@ class Database:
         )
         await self.db.authorizations.create_index([("id_type", ASCENDING)])
 
+        # 6. Chat settings collection indexes
+        await self.db.chat_settings.create_index(
+            [("target_id", ASCENDING), ("key", ASCENDING)], unique=True
+        )
+
         logger.info("MongoDB collections and indexes initialized successfully")
 
     async def _get_next_sequence(self, name: str = "feed_id") -> int:
@@ -972,3 +977,28 @@ class Database:
         """Retrieve all authorized entities stored in MongoDB."""
         cursor = self.db.authorizations.find().sort("created_at", ASCENDING)
         return await cursor.to_list(length=1000)
+
+    # ---------------- Chat Settings (e.g. Rich Text) ----------------
+
+    async def set_chat_setting(self, target_id: str, key: str, value: Any) -> None:
+        """Store or update a setting for a chat/channel in MongoDB."""
+        await self.db.chat_settings.update_one(
+            {"target_id": str(target_id), "key": key},
+            {"$set": {"value": value, "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+
+    async def get_chat_setting(
+        self, target_id: str, key: str, default: Any = None
+    ) -> Any:
+        """Retrieve a specific chat setting from MongoDB."""
+        doc = await self.db.chat_settings.find_one(
+            {"target_id": str(target_id), "key": key}
+        )
+        return doc["value"] if doc and "value" in doc else default
+
+    async def get_all_chat_settings(self, key: str) -> Dict[str, Any]:
+        """Retrieve all settings of a specific key across all chats."""
+        cursor = self.db.chat_settings.find({"key": key})
+        docs = await cursor.to_list(length=5000)
+        return {d["target_id"]: d.get("value") for d in docs if "target_id" in d}
