@@ -11,8 +11,8 @@
 - ⚡ **Realtime Background Poller**: Asynchronous polling with HTTP conditional GET headers (`ETag` and `Last-Modified`) to minimize bandwidth and stay polite to feed servers.
 - 🔍 **Keyword & Exclusion Filters**: Filter any feed by including only matching titles (e.g., `1080p, FLAC`) or excluding keywords (e.g., `CAM, Hindi`).
 - 🛡 **Smart Deduplication & Spam Protection**: Automatically records baseline items when a new feed is added so you don't get spammed with 50 old uploads.
-- 🗄 **Embedded SQLite Storage**: Lightweight, asynchronous SQLite database using `aiosqlite` with automatic cleanup of old items.
-- 🐳 **Docker & Docker Compose Ready**: Easily self-host 24/7 on any VPS, local machine, or home lab.
+- 🍃 **Cloud Persistent Storage (MongoDB)**: Powered by MongoDB Atlas (`DATABASE_URL`) via `motor` for 100% persistence across restarts—ready for cloud deployment on Render, Koyeb, Railway, Heroku, or VPS.
+- 🐳 **Docker & Cloud Ready**: Easily deploy 24/7 on any cloud container, VPS, or local machine.
 
 ---
 
@@ -55,8 +55,11 @@ cp config_sample.py config.py
 Edit `config.py` and set your bot token(s):
 
 ```python
-# Telegram Bot Token (from @BotFather) - optional if Discord only
-TELEGRAM_BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
+# Telegram Bot Token (from @BotFather)
+BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
+
+# MongoDB Connection String (from MongoDB Atlas)
+DATABASE_URL = "mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority"
 
 # Discord Bot Token (from Discord Developer Portal) - optional if Telegram only
 DISCORD_BOT_TOKEN = "MTE5OTg..."
@@ -79,7 +82,7 @@ python main.py
 
 1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
 2. Send `/newbot` and follow the prompts to choose a display name and username (e.g. `MyFeedPulseBot`).
-3. Copy the **HTTP API Token** provided by BotFather into `TELEGRAM_BOT_TOKEN` in your `config.py`.
+3. Copy the **HTTP API Token** provided by BotFather into `BOT_TOKEN` in your `config.py`.
 4. *(Optional for Group Chats)*:
    - In @BotFather, send `/setprivacy` -> Select your bot -> Choose **Disable** (this allows the bot to read `/add` and other commands inside group chats).
    - Add your bot to any Telegram group or channel and promote it to Admin so it can send messages.
@@ -150,7 +153,7 @@ FeedPulse/
 ├── main.py               # Unified application runner & lifecycle manager
 ├── database/
 │   ├── __init__.py
-│   └── db.py             # Asynchronous SQLite storage & indexing (aiosqlite)
+│   └── db.py             # Asynchronous MongoDB database interface (motor)
 ├── parser/
 │   ├── __init__.py
 │   └── feed_parser.py    # RSS & BitTorrent metadata extractor + Magnet builder
@@ -163,7 +166,7 @@ FeedPulse/
 │   ├── telegram_bot.py   # Telegram Bot implementation (python-telegram-bot v22)
 │   └── discord_bot.py    # Discord Bot implementation with Slash & Prefix commands
 ├── Dockerfile            # Container build recipe
-├── docker-compose.yml    # Compose orchestration with persistent SQLite volume
+├── docker-compose.yml    # Docker Compose orchestration
 └── requirements.txt      # Python dependencies
 ```
 

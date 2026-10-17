@@ -6,16 +6,16 @@ from typing import List
 
 try:
     from config import (
-        TELEGRAM_BOT_TOKEN,
+        BOT_TOKEN,
         DISCORD_BOT_TOKEN,
-        DATABASE_PATH,
+        DATABASE_URL,
         POLL_INTERVAL_SECONDS,
     )
 except ImportError:
     from config_sample import (
-        TELEGRAM_BOT_TOKEN,
+        BOT_TOKEN,
         DISCORD_BOT_TOKEN,
-        DATABASE_PATH,
+        DATABASE_URL,
         POLL_INTERVAL_SECONDS,
     )
 from database.db import Database
@@ -45,14 +45,14 @@ async def main() -> None:
     print(" ⚡ FeedPulse - Realtime RSS & BitTorrent Notifier Bot")
     print("=" * 60)
 
-    # 1. Validate tokens
-    has_telegram = bool(TELEGRAM_BOT_TOKEN)
+    # 1. Validate tokens & database
+    has_telegram = bool(BOT_TOKEN)
     has_discord = bool(DISCORD_BOT_TOKEN)
 
     if not has_telegram and not has_discord:
         print("\n❌ ERROR: No bot tokens configured in config.py!")
         print("Please edit config.py and configure at least one of:")
-        print("  • TELEGRAM_BOT_TOKEN  (from https://t.me/BotFather)")
+        print("  • BOT_TOKEN           (from https://t.me/BotFather)")
         print(
             "  • DISCORD_BOT_TOKEN   (from https://discord.com/developers/applications)"
         )
@@ -60,9 +60,28 @@ async def main() -> None:
         print("=" * 60)
         sys.exit(1)
 
+    if not DATABASE_URL:
+        print("\n❌ ERROR: DATABASE_URL is missing in config.py!")
+        print("Please configure your MongoDB connection string in config.py:")
+        print(
+            '  • DATABASE_URL = "mongodb+srv://..." (Free from https://www.mongodb.com/atlas)'
+        )
+        print("\nSee config_sample.py for a complete template.")
+        print("=" * 60)
+        sys.exit(1)
+
     # 2. Initialize Database
-    db = Database(DATABASE_PATH)
-    await db.init_db()
+    db = Database(DATABASE_URL)
+    try:
+        await db.init_db()
+    except Exception as e:
+        logger.error("Failed to connect to MongoDB: %s", e)
+        print(f"\n❌ ERROR: Could not connect to MongoDB: {e}")
+        print(
+            "Please check your DATABASE_URL in config.py and ensure IP access is configured in MongoDB Atlas."
+        )
+        print("=" * 60)
+        sys.exit(1)
 
     # 3. Initialize Dispatcher & Background Poller
     dispatcher = NotificationDispatcher()
@@ -74,11 +93,9 @@ async def main() -> None:
 
     if has_telegram:
         logger.info("Initializing Telegram Bot Service...")
-        telegram_service = TelegramBotService(
-            TELEGRAM_BOT_TOKEN, db, poller, dispatcher
-        )
+        telegram_service = TelegramBotService(BOT_TOKEN, db, poller, dispatcher)
     else:
-        logger.info("Telegram Bot is disabled (TELEGRAM_BOT_TOKEN not provided).")
+        logger.info("Telegram Bot is disabled (BOT_TOKEN not provided).")
 
     if has_discord:
         logger.info("Initializing Discord Bot Service...")

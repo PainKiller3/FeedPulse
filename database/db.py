@@ -1,104 +1,100 @@
-import aiosqlite
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Tuple
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo import ReturnDocument, ASCENDING
+from pymongo.errors import DuplicateKeyError, BulkWriteError
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
-    """Async SQLite database manager for feeds, subscriptions, and seen items."""
+    """Asynchronous MongoDB database manager for feeds, subscriptions, and seen items."""
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, db_url: str, db_name: str = "FeedPulse"):
+        self.db_url = db_url.strip()
+        self.db_name = db_name
+        self.client: Optional[AsyncIOMotorClient] = None
+        self.db: Optional[AsyncIOMotorDatabase] = None
 
     async def init_db(self) -> None:
-        """Create tables and indexes if they do not exist."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON;")
-
-            # Feeds table
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS feeds (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    url TEXT UNIQUE NOT NULL,
-                    title TEXT,
-                    last_checked TIMESTAMP,
-                    etag TEXT,
-                    modified TEXT,
-                    is_active INTEGER DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-
-            # Subscriptions table: links chat/channel on Telegram or Discord to a feed
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    feed_id INTEGER NOT NULL,
-                    platform TEXT NOT NULL,
-                    target_id TEXT NOT NULL,
-                    filter_keywords TEXT,
-                    filter_exclude TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE,
-                    UNIQUE(feed_id, platform, target_id)
-                );
-            """)
-
-            # Seen items table: prevents duplicate alerts
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS seen_items (
-                    feed_id INTEGER NOT NULL,
-                    item_key TEXT NOT NULL,
-                    title TEXT,
-                    seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (feed_id, item_key),
-                    FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE
-                );
-            """)
-
-            # Helpful indexes
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_subs_target ON subscriptions(platform, target_id);"
-            )
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_subs_feed ON subscriptions(feed_id);"
-            )
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_seen_feed ON seen_items(feed_id);"
+        """Connect to MongoDB and initialize collections, indexes, and counters."""
+        if not self.db_url:
+            raise ValueError(
+                "DATABASE_URL is empty! Please provide a valid MongoDB connection string."
             )
 
-            await db.commit()
-            logger.info("Database initialized successfully at %s", self.db_path)
+        self.client = AsyncIOMotorClient(self.db_url, serverSelectionTimeoutMS=5000)
+        self.db = self.client[self.db_name]
+
+        # Verify connectivity
+        await self.client.admin.command("ping")
+        logger.info("Successfully connected to MongoDB (%s)", self.db_name)
+
+        # 1. Feeds collection indexes
+        await self.db.feeds.create_index([("url", ASCENDING)], unique=True)
+        await self.db.feeds.create_index([("feed_id", ASCENDING)], unique=True)
+        await self.db.feeds.create_index([("is_active", ASCENDING)])
+
+        # 2. Subscriptions collection indexes
+        await self.db.subscriptions.create_index(
+            [("feed_id", ASCENDING), ("platform", ASCENDING), ("target_id", ASCENDING)],
+            unique=True,
+        )
+        await self.db.subscriptions.create_index(
+            [("platform", ASCENDING), ("target_id", ASCENDING)]
+        )
+
+        # 3. Seen items collection indexes with TTL auto-expiration (14 days)
+        await self.db.seen_items.create_index(
+            [("feed_id", ASCENDING), ("item_key", ASCENDING)], unique=True
+        )
+        await self.db.seen_items.create_index(
+            [("seen_at", ASCENDING)],
+            expireAfterSeconds=14
+            * 86400,  # Automatically removes items older than 14 days
+        )
+
+        logger.info("MongoDB collections and indexes initialized successfully")
+
+    async def _get_next_sequence(self, name: str = "feed_id") -> int:
+        """Generate auto-incrementing integer sequence for clean numeric IDs (e.g. /remove 1)."""
+        ret = await self.db.counters.find_one_and_update(
+            {"_id": name},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        return ret["seq"]
 
     async def add_or_get_feed(
         self, url: str, title: Optional[str] = None
     ) -> Tuple[int, str]:
-        """Add a feed if not exists, or return existing feed (id, title)."""
+        """Add a feed if not exists, or return existing feed (feed_id, title)."""
         url = url.strip()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT id, title FROM feeds WHERE url = ?", (url,)
-            )
-            row = await cursor.fetchone()
-            if row:
-                feed_id = row["id"]
-                current_title = row["title"] or title or url
-                if title and row["title"] != title:
-                    await db.execute(
-                        "UPDATE feeds SET title = ? WHERE id = ?", (title, feed_id)
-                    )
-                    await db.commit()
-                return feed_id, current_title
+        existing = await self.db.feeds.find_one({"url": url})
+        if existing:
+            feed_id = existing["feed_id"]
+            current_title = existing.get("title") or title or url
+            if title and existing.get("title") != title:
+                await self.db.feeds.update_one(
+                    {"_id": existing["_id"]}, {"$set": {"title": title}}
+                )
+            return feed_id, current_title
 
-            cursor = await db.execute(
-                "INSERT INTO feeds (url, title, is_active) VALUES (?, ?, 1)",
-                (url, title or url),
-            )
-            await db.commit()
-            feed_id = cursor.lastrowid
-            return feed_id, title or url
+        feed_id = await self._get_next_sequence("feed_id")
+        doc = {
+            "feed_id": feed_id,
+            "url": url,
+            "title": title or url,
+            "last_checked": None,
+            "etag": None,
+            "modified": None,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc),
+        }
+        await self.db.feeds.insert_one(doc)
+        return feed_id, title or url
 
     async def subscribe(
         self,
@@ -117,99 +113,89 @@ class Database:
         target_id = str(target_id)
         platform = platform.lower()
 
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT id FROM subscriptions WHERE feed_id = ? AND platform = ? AND target_id = ?",
-                (feed_id, platform, target_id),
-            )
-            existing = await cursor.fetchone()
-            if existing:
-                # Update filters if provided
-                if filter_keywords is not None or filter_exclude is not None:
-                    await db.execute(
-                        """
-                        UPDATE subscriptions
-                        SET filter_keywords = COALESCE(?, filter_keywords),
-                            filter_exclude = COALESCE(?, filter_exclude)
-                        WHERE id = ?
-                        """,
-                        (filter_keywords, filter_exclude, existing[0]),
-                    )
-                    await db.commit()
-                return feed_id, feed_title, False
+        existing = await self.db.subscriptions.find_one(
+            {"feed_id": feed_id, "platform": platform, "target_id": target_id}
+        )
 
-            await db.execute(
-                """
-                INSERT INTO subscriptions (feed_id, platform, target_id, filter_keywords, filter_exclude)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (feed_id, platform, target_id, filter_keywords, filter_exclude),
-            )
-            # Ensure feed is active
-            await db.execute("UPDATE feeds SET is_active = 1 WHERE id = ?", (feed_id,))
-            await db.commit()
-            return feed_id, feed_title, True
+        if existing:
+            # Update filters if provided
+            update_fields = {}
+            if filter_keywords is not None:
+                update_fields["filter_keywords"] = filter_keywords
+            if filter_exclude is not None:
+                update_fields["filter_exclude"] = filter_exclude
+            if update_fields:
+                await self.db.subscriptions.update_one(
+                    {"_id": existing["_id"]}, {"$set": update_fields}
+                )
+            return feed_id, feed_title, False
+
+        doc = {
+            "feed_id": feed_id,
+            "platform": platform,
+            "target_id": target_id,
+            "filter_keywords": filter_keywords,
+            "filter_exclude": filter_exclude,
+            "created_at": datetime.now(timezone.utc),
+        }
+        try:
+            await self.db.subscriptions.insert_one(doc)
+        except DuplicateKeyError:
+            return feed_id, feed_title, False
+
+        # Ensure feed is marked active
+        await self.db.feeds.update_one(
+            {"feed_id": feed_id}, {"$set": {"is_active": True}}
+        )
+        return feed_id, feed_title, True
 
     async def unsubscribe(
         self, platform: str, target_id: str, feed_identifier: str
     ) -> Optional[str]:
         """
-        Unsubscribe a target by feed ID or feed URL.
+        Unsubscribe a target by feed ID or feed URL/title.
         Returns the removed feed title/url if found, or None.
         """
         target_id = str(target_id)
         platform = platform.lower()
         feed_identifier = feed_identifier.strip()
 
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-
-            # Find matching feed
-            if feed_identifier.isdigit():
-                cursor = await db.execute(
-                    """
-                    SELECT s.id as sub_id, f.id as feed_id, f.title, f.url
-                    FROM subscriptions s
-                    JOIN feeds f ON s.feed_id = f.id
-                    WHERE s.platform = ? AND s.target_id = ? AND (f.id = ? OR s.id = ?)
-                    """,
-                    (platform, target_id, int(feed_identifier), int(feed_identifier)),
-                )
-            else:
-                cursor = await db.execute(
-                    """
-                    SELECT s.id as sub_id, f.id as feed_id, f.title, f.url
-                    FROM subscriptions s
-                    JOIN feeds f ON s.feed_id = f.id
-                    WHERE s.platform = ? AND s.target_id = ? AND (f.url = ? OR f.title LIKE ?)
-                    """,
-                    (platform, target_id, feed_identifier, f"%{feed_identifier}%"),
-                )
-
-            row = await cursor.fetchone()
-            if not row:
-                return None
-
-            sub_id = row["sub_id"]
-            feed_id = row["feed_id"]
-            feed_label = row["title"] or row["url"]
-
-            await db.execute("DELETE FROM subscriptions WHERE id = ?", (sub_id,))
-            await db.commit()
-
-            # Check if any subscribers remain for this feed
-            count_cursor = await db.execute(
-                "SELECT COUNT(*) FROM subscriptions WHERE feed_id = ?", (feed_id,)
+        # Find the feed document
+        if feed_identifier.isdigit():
+            feed_doc = await self.db.feeds.find_one({"feed_id": int(feed_identifier)})
+        else:
+            feed_doc = await self.db.feeds.find_one(
+                {
+                    "$or": [
+                        {"url": feed_identifier},
+                        {"title": {"$regex": feed_identifier, "$options": "i"}},
+                    ]
+                }
             )
-            count = (await count_cursor.fetchone())[0]
-            if count == 0:
-                # Mark inactive so we don't keep polling it
-                await db.execute(
-                    "UPDATE feeds SET is_active = 0 WHERE id = ?", (feed_id,)
-                )
-                await db.commit()
 
-            return feed_label
+        if not feed_doc:
+            return None
+
+        feed_id = feed_doc["feed_id"]
+        feed_label = feed_doc.get("title") or feed_doc.get("url")
+
+        res = await self.db.subscriptions.delete_one(
+            {"feed_id": feed_id, "platform": platform, "target_id": target_id}
+        )
+
+        if res.deleted_count == 0:
+            return None
+
+        # If no subscribers left for this feed, mark inactive
+        active_sub_count = await self.db.subscriptions.count_documents(
+            {"feed_id": feed_id}
+        )
+        if active_sub_count == 0:
+            await self.db.feeds.update_one(
+                {"feed_id": feed_id}, {"$set": {"is_active": False}}
+            )
+
+        return feed_label
 
     async def update_filters(
         self,
@@ -222,26 +208,21 @@ class Database:
         """Update keyword filter rules for a specific subscription."""
         target_id = str(target_id)
         platform = platform.lower()
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                """
-                UPDATE subscriptions
-                SET filter_keywords = CASE WHEN ? IS NOT NULL THEN ? ELSE filter_keywords END,
-                    filter_exclude = CASE WHEN ? IS NOT NULL THEN ? ELSE filter_exclude END
-                WHERE platform = ? AND target_id = ? AND feed_id = ?
-                """,
-                (
-                    filter_keywords,
-                    filter_keywords,
-                    filter_exclude,
-                    filter_exclude,
-                    platform,
-                    target_id,
-                    feed_id,
-                ),
-            )
-            await db.commit()
-            return cursor.rowcount > 0
+
+        update_fields = {}
+        if filter_keywords is not None:
+            update_fields["filter_keywords"] = filter_keywords
+        if filter_exclude is not None:
+            update_fields["filter_exclude"] = filter_exclude
+
+        if not update_fields:
+            return False
+
+        res = await self.db.subscriptions.update_one(
+            {"platform": platform, "target_id": target_id, "feed_id": feed_id},
+            {"$set": update_fields},
+        )
+        return res.modified_count > 0 or res.matched_count > 0
 
     async def list_subscriptions(
         self, platform: str, target_id: str
@@ -249,71 +230,62 @@ class Database:
         """List all feeds subscribed by a specific chat/channel."""
         target_id = str(target_id)
         platform = platform.lower()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT f.id as feed_id, f.url, f.title, f.last_checked,
-                       s.id as sub_id, s.filter_keywords, s.filter_exclude, s.created_at
-                FROM subscriptions s
-                JOIN feeds f ON s.feed_id = f.id
-                WHERE s.platform = ? AND s.target_id = ?
-                ORDER BY s.id ASC
-                """,
-                (platform, target_id),
-            )
-            rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+
+        pipeline = [
+            {"$match": {"platform": platform, "target_id": target_id}},
+            {
+                "$lookup": {
+                    "from": "feeds",
+                    "localField": "feed_id",
+                    "foreignField": "feed_id",
+                    "as": "feed_info",
+                }
+            },
+            {"$unwind": "$feed_info"},
+            {
+                "$project": {
+                    "feed_id": "$feed_id",
+                    "url": "$feed_info.url",
+                    "title": "$feed_info.title",
+                    "last_checked": "$feed_info.last_checked",
+                    "filter_keywords": "$filter_keywords",
+                    "filter_exclude": "$filter_exclude",
+                    "created_at": "$created_at",
+                }
+            },
+            {"$sort": {"feed_id": ASCENDING}},
+        ]
+
+        cursor = self.db.subscriptions.aggregate(pipeline)
+        return await cursor.to_list(length=500)
 
     async def get_active_feeds(self) -> List[Dict[str, Any]]:
         """Return all active feeds that have at least one subscriber."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT DISTINCT f.id, f.url, f.title, f.last_checked, f.etag, f.modified
-                FROM feeds f
-                JOIN subscriptions s ON f.id = s.feed_id
-                WHERE f.is_active = 1
-                ORDER BY f.id ASC
-                """
-            )
-            rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+        cursor = self.db.feeds.find({"is_active": True}).sort("feed_id", ASCENDING)
+        raw_feeds = await cursor.to_list(length=1000)
+        # Adapt document fields to standard interface (e.g. id = feed_id)
+        feeds = []
+        for f in raw_feeds:
+            f["id"] = f["feed_id"]
+            feeds.append(f)
+        return feeds
 
     async def get_subscribers_for_feed(self, feed_id: int) -> List[Dict[str, Any]]:
         """Get all subscriber targets (Telegram / Discord) for a given feed."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT platform, target_id, filter_keywords, filter_exclude
-                FROM subscriptions
-                WHERE feed_id = ?
-                """,
-                (feed_id,),
-            )
-            rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+        cursor = self.db.subscriptions.find({"feed_id": feed_id})
+        return await cursor.to_list(length=1000)
 
     async def has_seen_any_items(self, feed_id: int) -> bool:
         """Check if we have already recorded any seen items for this feed."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT 1 FROM seen_items WHERE feed_id = ? LIMIT 1", (feed_id,)
-            )
-            row = await cursor.fetchone()
-            return row is not None
+        doc = await self.db.seen_items.find_one({"feed_id": feed_id})
+        return doc is not None
 
     async def is_item_seen(self, feed_id: int, item_key: str) -> bool:
         """Check if a specific item has already been marked as seen."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT 1 FROM seen_items WHERE feed_id = ? AND item_key = ?",
-                (feed_id, item_key),
-            )
-            row = await cursor.fetchone()
-            return row is not None
+        doc = await self.db.seen_items.find_one(
+            {"feed_id": feed_id, "item_key": item_key}
+        )
+        return doc is not None
 
     async def mark_items_seen(
         self, feed_id: int, items: List[Tuple[str, Optional[str]]]
@@ -321,15 +293,18 @@ class Database:
         """Batch mark items as seen (item_key, title)."""
         if not items:
             return
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany(
-                """
-                INSERT OR IGNORE INTO seen_items (feed_id, item_key, title)
-                VALUES (?, ?, ?)
-                """,
-                [(feed_id, key, title) for key, title in items],
-            )
-            await db.commit()
+
+        now = datetime.now(timezone.utc)
+        docs = [
+            {"feed_id": feed_id, "item_key": key, "title": title, "seen_at": now}
+            for key, title in items
+        ]
+
+        try:
+            await self.db.seen_items.insert_many(docs, ordered=False)
+        except BulkWriteError:
+            # Ignore duplicate key write errors
+            pass
 
     async def update_feed_checked(
         self,
@@ -339,38 +314,20 @@ class Database:
         modified: Optional[str] = None,
     ) -> None:
         """Update last_checked timestamp, etag, and modified headers."""
-        async with aiosqlite.connect(self.db_path) as db:
-            if title:
-                await db.execute(
-                    """
-                    UPDATE feeds
-                    SET last_checked = CURRENT_TIMESTAMP,
-                        title = ?,
-                        etag = COALESCE(?, etag),
-                        modified = COALESCE(?, modified)
-                    WHERE id = ?
-                    """,
-                    (title, etag, modified, feed_id),
-                )
-            else:
-                await db.execute(
-                    """
-                    UPDATE feeds
-                    SET last_checked = CURRENT_TIMESTAMP,
-                        etag = COALESCE(?, etag),
-                        modified = COALESCE(?, modified)
-                    WHERE id = ?
-                    """,
-                    (etag, modified, feed_id),
-                )
-            await db.commit()
+        now = datetime.now(timezone.utc)
+        update_fields: Dict[str, Any] = {"last_checked": now}
+
+        if title:
+            update_fields["title"] = title
+        if etag:
+            update_fields["etag"] = etag
+        if modified:
+            update_fields["modified"] = modified
+
+        await self.db.feeds.update_one({"feed_id": feed_id}, {"$set": update_fields})
 
     async def cleanup_old_seen_items(self, days: int = 14) -> int:
-        """Purge seen items older than N days to prevent database bloating."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM seen_items WHERE seen_at < datetime('now', ?)",
-                (f"-{days} days",),
-            )
-            await db.commit()
-            return cursor.rowcount
+        """Purge seen items older than N days (MongoDB TTL index handles this automatically as well)."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        res = await self.db.seen_items.delete_many({"seen_at": {"$lt": cutoff}})
+        return res.deleted_count

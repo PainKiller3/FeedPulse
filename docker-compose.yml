@@ -8,7 +8,3 @@ services:
     volumes:
       # Mount configuration file
       - ./config.py:/app/config.py
-      # Persist SQLite database across container restarts
-      - ./data:/app/data
-    environment:
-      - DATABASE_PATH=/app/data/feedpulse.db
