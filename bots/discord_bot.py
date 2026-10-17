@@ -74,11 +74,13 @@ class DiscordBotService:
                     "**Slash Commands:**\n"
                     "➕ `/add <url> [filter_include] [filter_exclude]` - Subscribe to a feed\n"
                     "📋 `/list` - List active feeds in this channel\n"
+                    "⏸️ `/pause <id_or_all>` - Pause notifications for a feed or all feeds\n"
+                    "▶️ `/resume <id_or_all>` - Resume notifications for a feed or all feeds\n"
                     "➖ `/remove <id_or_url>` - Unsubscribe from a feed\n"
                     "🔍 `/filter <id> <include> <exclude>` - Set keyword filters\n"
                     "🔄 `/check` - Force an immediate feed check\n"
                     "🧪 `/test` - Preview a sample torrent alert\n\n"
-                    "*(Prefix commands like `!add <url>` also work!)*"
+                    "*(Prefix commands like `!add <url>`, `!pause <id>`, `!resume <id>` also work!)*"
                 ),
                 color=0x2ECC71,
             )
@@ -203,10 +205,77 @@ class DiscordBotService:
                 if s.get("filter_exclude"):
                     val += f"\n🚫 *Exclude:* `{s['filter_exclude']}`"
 
-                embed.add_field(name=f"[{fid}] {title[:200]}", value=val, inline=False)
+                paused_tag = " ⏸️ [PAUSED]" if s.get("is_paused") else ""
+                embed.add_field(
+                    name=f"[{fid}] {title[:180]}{paused_tag}",
+                    value=val,
+                    inline=False,
+                )
 
-            embed.set_footer(text="To remove a feed, use /remove <id>")
+            embed.set_footer(text="Manage: /pause <id> | /resume <id> | /remove <id>")
             await interaction.response.send_message(embed=embed)
+
+        @self.bot.tree.command(
+            name="pause",
+            description="Pause notifications for a feed or all feeds in this channel",
+        )
+        @app_commands.describe(
+            feed_id_or_all="The numeric feed ID (from /list) or 'all' to pause all feeds"
+        )
+        async def slash_pause(interaction: discord.Interaction, feed_id_or_all: str):
+            channel_id = str(interaction.channel_id)
+            feed_label, status, count = await self.db.set_subscription_pause(
+                "discord", channel_id, feed_id_or_all, paused=True
+            )
+            if status == "success":
+                if feed_id_or_all.lower() == "all":
+                    await interaction.response.send_message(
+                        f"⏸️ **Paused {count} feed subscription(s)** in this channel."
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"⏸️ **Feed Paused:** `{feed_label or feed_id_or_all}` has been paused."
+                    )
+            elif status == "already_paused":
+                await interaction.response.send_message(
+                    f"ℹ️ Feed `{feed_label or feed_id_or_all}` is already paused."
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ No matching subscription found for `{feed_id_or_all}`.\n"
+                    "Use `/list` to check feed IDs."
+                )
+
+        @self.bot.tree.command(
+            name="resume",
+            description="Resume notifications for a feed or all feeds in this channel",
+        )
+        @app_commands.describe(
+            feed_id_or_all="The numeric feed ID (from /list) or 'all' to resume all feeds"
+        )
+        async def slash_resume(interaction: discord.Interaction, feed_id_or_all: str):
+            channel_id = str(interaction.channel_id)
+            feed_label, status, count = await self.db.set_subscription_pause(
+                "discord", channel_id, feed_id_or_all, paused=False
+            )
+            if status == "success":
+                if feed_id_or_all.lower() == "all":
+                    await interaction.response.send_message(
+                        f"▶️ **Resumed {count} feed subscription(s)** in this channel."
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"▶️ **Feed Resumed:** `{feed_label or feed_id_or_all}` is now active."
+                    )
+            elif status == "already_resumed":
+                await interaction.response.send_message(
+                    f"ℹ️ Feed `{feed_label or feed_id_or_all}` is already active."
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ No matching subscription found for `{feed_id_or_all}`.\n"
+                    "Use `/list` to check feed IDs."
+                )
 
         @self.bot.tree.command(
             name="remove", description="Unsubscribe from a feed in this channel"
@@ -216,11 +285,13 @@ class DiscordBotService:
         )
         async def slash_remove(interaction: discord.Interaction, feed_id_or_url: str):
             channel_id = str(interaction.channel_id)
-            removed = await self.db.unsubscribe("discord", channel_id, feed_id_or_url)
+            removed, status = await self.db.unsubscribe(
+                "discord", channel_id, feed_id_or_url
+            )
 
-            if removed:
+            if status == "success":
                 await interaction.response.send_message(
-                    f"🗑 **Unsubscribed:** Removed `{removed}` from this channel."
+                    f"🗑 **Unsubscribed:** Removed `{removed or feed_id_or_url}` from this channel."
                 )
             else:
                 await interaction.response.send_message(
@@ -318,8 +389,56 @@ class DiscordBotService:
                 return
             msg = f"📋 **Feeds in #{ctx.channel}:**\n"
             for s in subs:
-                msg += f"• **[{s['feed_id']}]** {s['title']} - `<{s['url']}>\n`"
+                paused_tag = " ⏸️ [PAUSED]" if s.get("is_paused") else ""
+                msg += f"• **[{s['feed_id']}]** {s['title']}{paused_tag} - `<{s['url']}>\n`"
+            msg += "\n*Manage:* `!pause <id>` | `!resume <id>` | `!remove <id>`"
             await ctx.send(msg)
+
+        @self.bot.command(name="pause")
+        async def prefix_pause(ctx: commands.Context, feed_id_or_all: str = None):
+            if not feed_id_or_all:
+                await ctx.send("⚠️ Usage: `!pause <feed_id_or_all>`")
+                return
+            channel_id = str(ctx.channel.id)
+            feed_label, status, count = await self.db.set_subscription_pause(
+                "discord", channel_id, feed_id_or_all, paused=True
+            )
+            if status == "success":
+                if feed_id_or_all.lower() == "all":
+                    await ctx.send(f"⏸️ Paused {count} feed(s) in this channel.")
+                else:
+                    await ctx.send(
+                        f"⏸️ Paused `{feed_label or feed_id_or_all}` in this channel."
+                    )
+            elif status == "already_paused":
+                await ctx.send(f"ℹ️ `{feed_label or feed_id_or_all}` is already paused.")
+            else:
+                await ctx.send(
+                    f"❌ No matching feed found for `{feed_id_or_all}` in this channel."
+                )
+
+        @self.bot.command(name="resume")
+        async def prefix_resume(ctx: commands.Context, feed_id_or_all: str = None):
+            if not feed_id_or_all:
+                await ctx.send("⚠️ Usage: `!resume <feed_id_or_all>`")
+                return
+            channel_id = str(ctx.channel.id)
+            feed_label, status, count = await self.db.set_subscription_pause(
+                "discord", channel_id, feed_id_or_all, paused=False
+            )
+            if status == "success":
+                if feed_id_or_all.lower() == "all":
+                    await ctx.send(f"▶️ Resumed {count} feed(s) in this channel.")
+                else:
+                    await ctx.send(
+                        f"▶️ Resumed `{feed_label or feed_id_or_all}` in this channel."
+                    )
+            elif status == "already_resumed":
+                await ctx.send(f"ℹ️ `{feed_label or feed_id_or_all}` is already active.")
+            else:
+                await ctx.send(
+                    f"❌ No matching feed found for `{feed_id_or_all}` in this channel."
+                )
 
         @self.bot.command(name="remove", aliases=["del", "delete"])
         async def prefix_remove(ctx: commands.Context, feed_id: str = None):
@@ -327,9 +446,9 @@ class DiscordBotService:
                 await ctx.send("⚠️ Usage: `!remove <feed_id_or_url>`")
                 return
             channel_id = str(ctx.channel.id)
-            removed = await self.db.unsubscribe("discord", channel_id, feed_id)
-            if removed:
-                await ctx.send(f"🗑 Removed `{removed}` from this channel.")
+            removed, status = await self.db.unsubscribe("discord", channel_id, feed_id)
+            if status == "success":
+                await ctx.send(f"🗑 Removed `{removed or feed_id}` from this channel.")
             else:
                 await ctx.send(f"❌ No matching feed found for `{feed_id}`.")
 

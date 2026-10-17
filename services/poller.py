@@ -203,13 +203,17 @@ class FeedPoller:
 
         subscribers = await self.db.get_subscribers_for_feed(feed_id)
         if not subscribers:
-            logger.warning("No subscribers found for active feed %s", feed_id)
-
-        # Reverse items so oldest new item is sent first (chronological order)
-        for item in reversed(items_to_alert):
-            await self._notify_subscribers(subscribers, item, effective_title)
-            # Short sleep to prevent hitting Telegram/Discord rate limits
-            await asyncio.sleep(0.1)
+            logger.debug(
+                "No unpaused subscribers found for active feed %s (%s)",
+                feed_id,
+                effective_title,
+            )
+        else:
+            # Reverse items so oldest new item is sent first (chronological order)
+            for item in reversed(items_to_alert):
+                await self._notify_subscribers(subscribers, item, effective_title)
+                # Short sleep to prevent hitting Telegram/Discord rate limits
+                await asyncio.sleep(0.1)
 
         # Mark all new items as seen
         items_to_mark = [(it.item_key, it.title) for it in new_items]

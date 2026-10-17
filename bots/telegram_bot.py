@@ -89,6 +89,10 @@ class TelegramBotService:
         self.application.add_handler(
             CommandHandler(["remove", "del", "delete"], self.cmd_remove)
         )
+        self.application.add_handler(CommandHandler(["pause", "mute"], self.cmd_pause))
+        self.application.add_handler(
+            CommandHandler(["resume", "unmute"], self.cmd_resume)
+        )
         self.application.add_handler(CommandHandler("filter", self.cmd_filter))
         self.application.add_handler(CommandHandler("check", self.cmd_check))
         self.application.add_handler(CommandHandler("test", self.cmd_test))
@@ -108,6 +112,8 @@ class TelegramBotService:
             BotCommand("add", "Subscribe to an RSS/torrent feed"),
             BotCommand("list", "View active feed subscriptions"),
             BotCommand("myfeeds", "View your subscriptions across all chats"),
+            BotCommand("pause", "Pause notifications for a feed or 'all'"),
+            BotCommand("resume", "Resume notifications for a feed or 'all'"),
             BotCommand("remove", "Unsubscribe from a feed"),
             BotCommand("filter", "Configure keyword filters (inc=/exc=)"),
             BotCommand("check", "Force an immediate feed check"),
@@ -269,6 +275,8 @@ class TelegramBotService:
             "➕ /add [title] &lt;url&gt; [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [chat/channel] [topic_id]\n"
             "📋 /list [all] [chat/channel] — View your subscribed feeds (or all feeds if admin)\n"
             "👤 /myfeeds — View all your subscriptions across all chats\n"
+            "⏸️ /pause &lt;id_or_all&gt; [chat/channel] — Pause notifications\n"
+            "▶️ /resume &lt;id_or_all&gt; [chat/channel] — Resume notifications\n"
             "➖ /remove &lt;id&gt; [chat/channel] — Unsubscribe from a feed\n"
             "🔍 /filter &lt;id&gt; -inf &lt;words&gt; -exf &lt;words&gt; — Keyword filters\n"
             "🔄 /check — Force an immediate feed check\n"
@@ -279,6 +287,9 @@ class TelegramBotService:
             "  /add PSA https://www.limetorrents.fun/rss/ -inf PSA\n"
             "• Subscribe a channel with include & exclude filters:\n"
             "  /add https://example.com/rss/ -inf 1080p,flac -exf 720p,cam @MyChannel\n"
+            "• Pause or resume notifications:\n"
+            "  /pause 1 or /pause all\n"
+            "  /resume 1 or /resume all\n"
             "• Update filters for feed #1:\n"
             "  /filter 1 -inf PSA,1080p -exf 720p\n"
             "• List your feeds in current chat:\n"
@@ -611,7 +622,8 @@ class TelegramBotService:
             if tid:
                 dest_label += f" [Topic: <code>#{tid}</code>]"
 
-            lines.append(f"• <b>[{fid}] {title}</b>")
+            status_badge = " ⏸️ <i>[PAUSED]</i>" if s.get("is_paused") else ""
+            lines.append(f"• <b>[{fid}] {title}</b>{status_badge}")
             lines.append(f"  🎯 Destination: {dest_label}")
             lines.append(f"  🔗 <code>{url}</code>")
             if s.get("filter_keywords"):
@@ -622,7 +634,9 @@ class TelegramBotService:
                 lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
-        lines.append("<i>To remove a feed, use:</i> /remove &lt;id&gt;")
+        lines.append(
+            "<i>Manage:</i> /pause &lt;id&gt; | /resume &lt;id&gt; | /remove &lt;id&gt;"
+        )
         await update.effective_message.reply_html(
             "\n".join(lines), disable_web_page_preview=True
         )
@@ -707,8 +721,9 @@ class TelegramBotService:
             tid = s.get("thread_id")
             sub_uid = s.get("user_id")
 
+            status_badge = " ⏸️ <i>[PAUSED]</i>" if s.get("is_paused") else ""
             topic_badge = f" [Topic: <code>#{tid}</code>]" if tid else ""
-            lines.append(f"• <b>[{fid}] {title}</b>{topic_badge}")
+            lines.append(f"• <b>[{fid}] {title}</b>{topic_badge}{status_badge}")
             lines.append(f"  🔗 <code>{url}</code>")
             if filter_user_id is None and sub_uid:
                 lines.append(f"  👤 <i>Subscriber ID: <code>{sub_uid}</code></i>")
@@ -720,7 +735,9 @@ class TelegramBotService:
                 lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
-        lines.append("<i>To remove a feed, use:</i> /remove &lt;id&gt;")
+        lines.append(
+            "<i>Manage:</i> /pause &lt;id&gt; | /resume &lt;id&gt; | /remove &lt;id&gt;"
+        )
         await update.effective_message.reply_html(
             "\n".join(lines), disable_web_page_preview=True
         )
@@ -782,6 +799,100 @@ class TelegramBotService:
             await update.effective_message.reply_html(
                 f"❌ Subscription not found for <code>{html.escape(feed_identifier)}</code> in {dest_str}.\n"
                 "Use /list to see your active feed IDs."
+            )
+
+    async def cmd_pause(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Pause notifications for a specific feed or 'all' feeds."""
+        await self._handle_pause_resume(update, context, pause=True)
+
+    async def cmd_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Resume notifications for a specific feed or 'all' feeds."""
+        await self._handle_pause_resume(update, context, pause=False)
+
+    async def _handle_pause_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, pause: bool
+    ) -> None:
+        action_verb = "pause" if pause else "resume"
+        past_verb = "paused" if pause else "resumed"
+        action_icon = "⏸️" if pause else "▶️"
+
+        if not await self.check_authorization(update, context):
+            return
+
+        if not context.args:
+            await update.effective_message.reply_html(
+                f"⚠️ <b>Usage:</b>\n"
+                f"• /{action_verb} &lt;feed_id_or_url&gt; (e.g. /{action_verb} 1)\n"
+                f"• /{action_verb} all (pause/resume all your feeds)\n"
+                f"• /{action_verb} &lt;feed_id&gt; &lt;@channel_or_chat_id&gt;\n\n"
+                f"Check your feeds with /list."
+            )
+            return
+
+        user = update.effective_user
+        user_id = user.id if user else 0
+        is_admin = await self.is_admin_or_super(update)
+
+        feed_identifier = context.args[0].strip()
+        target_arg = context.args[1] if len(context.args) > 1 else None
+
+        target_id, thread_id, target_title = await self._resolve_destination(
+            update, context, target_arg
+        )
+        if not target_id:
+            return
+
+        dest_str = html.escape(target_title)
+        if thread_id:
+            dest_str += f" [Topic: #{thread_id}]"
+
+        feed_label, status, count = await self.db.set_subscription_pause(
+            "telegram",
+            target_id,
+            feed_identifier,
+            paused=pause,
+            thread_id=thread_id,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+
+        if status == "success":
+            if feed_identifier.lower() == "all":
+                await update.effective_message.reply_html(
+                    f"{action_icon} <b>Successfully {past_verb.capitalize()}!</b>\n"
+                    f"Updated <b>{count}</b> feed subscription(s) in {dest_str}."
+                )
+            else:
+                await update.effective_message.reply_html(
+                    f"{action_icon} <b>Feed {past_verb.capitalize()}:</b>\n"
+                    f"<b>{html.escape(feed_label or feed_identifier)}</b> has been {past_verb} for {dest_str}.\n\n"
+                    f"<i>To {'resume' if pause else 'pause'} anytime:</i> /{'resume' if pause else 'pause'} {html.escape(feed_identifier)}"
+                )
+        elif status in ("already_paused", "already_resumed"):
+            target_state = "paused" if status == "already_paused" else "active/resumed"
+            name_str = (
+                f"<b>{html.escape(feed_label or feed_identifier)}</b>"
+                if feed_identifier.lower() != "all"
+                else "Your feed(s)"
+            )
+            is_are = "is" if feed_identifier.lower() != "all" else "are"
+            await update.effective_message.reply_html(
+                f"ℹ️ {name_str} in {dest_str} {is_are} already {target_state}."
+            )
+        elif status == "permission_denied":
+            await update.effective_message.reply_html(
+                f"⛔ <b>Permission Denied:</b> Feed <b>{html.escape(feed_label or feed_identifier)}</b> "
+                f"was subscribed by another user in {dest_str}.\n\n"
+                f"You can only {action_verb} feeds you added. Group Admins and Bot Owners can {action_verb} any feed."
+            )
+        else:
+            await update.effective_message.reply_html(
+                f"❌ Subscription not found for <code>{html.escape(feed_identifier)}</code> in {dest_str}.\n"
+                f"Use /list to see your active feed IDs."
             )
 
     async def cmd_filter(

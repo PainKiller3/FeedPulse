@@ -75,6 +75,7 @@ class Database:
             [("platform", ASCENDING), ("target_id", ASCENDING), ("user_id", ASCENDING)]
         )
         await self.db.subscriptions.create_index([("user_id", ASCENDING)])
+        await self.db.subscriptions.create_index([("is_paused", ASCENDING)])
 
         # 3. Seen items collection indexes with TTL auto-expiration (14 days)
         await self.db.seen_items.create_index(
@@ -378,6 +379,114 @@ class Database:
             else "not_found"
         )
 
+    async def set_subscription_pause(
+        self,
+        platform: str,
+        target_id: str,
+        feed_identifier: str,
+        paused: bool,
+        thread_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> Tuple[Optional[str], str, int]:
+        """
+        Pause or resume notifications for a specific feed or 'all' feeds.
+        Returns (feed_label, status_code, count_affected)
+        status_code: 'success', 'already_paused', 'already_resumed', 'not_found', 'permission_denied'
+        """
+        target_id = str(target_id)
+        platform = platform.lower()
+        feed_identifier = feed_identifier.strip()
+        is_private = (user_id is not None) and (str(target_id) == str(user_id))
+
+        if feed_identifier.lower() == "all":
+            query: Dict[str, Any] = {"platform": platform}
+            if is_private or not is_admin:
+                if user_id is not None:
+                    query["user_id"] = user_id
+                else:
+                    query["target_id"] = target_id
+            else:
+                query["target_id"] = target_id
+                if thread_id is not None:
+                    query["thread_id"] = thread_id
+
+            total = await self.db.subscriptions.count_documents(query)
+            if total == 0:
+                return None, "not_found", 0
+
+            update_query = dict(query)
+            update_query["is_paused"] = {"$ne": paused}
+            res = await self.db.subscriptions.update_many(
+                update_query, {"$set": {"is_paused": paused}}
+            )
+            if res.modified_count == 0:
+                return None, "already_paused" if paused else "already_resumed", 0
+
+            return None, "success", res.modified_count
+
+        if feed_identifier.isdigit():
+            feed_doc = await self.db.feeds.find_one({"feed_id": int(feed_identifier)})
+        else:
+            feed_doc = await self.db.feeds.find_one(
+                {
+                    "$or": [
+                        {"url": feed_identifier},
+                        {"title": {"$regex": feed_identifier, "$options": "i"}},
+                    ]
+                }
+            )
+
+        if not feed_doc:
+            return None, "not_found", 0
+
+        feed_id = feed_doc["feed_id"]
+        feed_label = feed_doc.get("title") or feed_doc.get("url")
+
+        base_query: Dict[str, Any] = {
+            "feed_id": feed_id,
+            "platform": platform,
+            "target_id": target_id,
+        }
+        if thread_id is not None:
+            base_query["thread_id"] = thread_id
+
+        existing_subs = await self.db.subscriptions.find(base_query).to_list(length=100)
+        if not existing_subs:
+            if is_private and user_id is not None:
+                user_subs = await self.db.subscriptions.find(
+                    {"feed_id": feed_id, "platform": platform, "user_id": user_id}
+                ).to_list(length=10)
+                if user_subs:
+                    existing_subs = user_subs
+            if not existing_subs:
+                return None, "not_found", 0
+
+        if not is_admin and not is_private and user_id is not None:
+            user_sub = next(
+                (s for s in existing_subs if s.get("user_id") == user_id), None
+            )
+            if not user_sub:
+                return feed_label, "permission_denied", 0
+            target_sub = user_sub
+        else:
+            if user_id is not None:
+                user_sub = next(
+                    (s for s in existing_subs if s.get("user_id") == user_id), None
+                )
+                target_sub = user_sub if user_sub else existing_subs[0]
+            else:
+                target_sub = existing_subs[0]
+
+        currently_paused = target_sub.get("is_paused", False)
+        if currently_paused == paused:
+            return feed_label, "already_paused" if paused else "already_resumed", 0
+
+        await self.db.subscriptions.update_one(
+            {"_id": target_sub["_id"]}, {"$set": {"is_paused": paused}}
+        )
+        return feed_label, "success", 1
+
     async def list_subscriptions(
         self,
         platform: str,
@@ -425,6 +534,7 @@ class Database:
                     "filter_exclude": "$filter_exclude",
                     "thread_id": "$thread_id",
                     "user_id": "$user_id",
+                    "is_paused": "$is_paused",
                     "created_at": "$created_at",
                 }
             },
@@ -460,6 +570,7 @@ class Database:
                     "filter_keywords": "$filter_keywords",
                     "filter_exclude": "$filter_exclude",
                     "last_checked": "$feed_info.last_checked",
+                    "is_paused": "$is_paused",
                     "created_at": "$created_at",
                 }
             },
@@ -486,8 +597,10 @@ class Database:
         return feeds
 
     async def get_subscribers_for_feed(self, feed_id: int) -> List[Dict[str, Any]]:
-        """Get all subscriber targets (Telegram / Discord) for a given feed."""
-        cursor = self.db.subscriptions.find({"feed_id": feed_id})
+        """Get all subscriber targets (Telegram / Discord) for a given feed, excluding paused ones."""
+        cursor = self.db.subscriptions.find(
+            {"feed_id": feed_id, "is_paused": {"$ne": True}}
+        )
         return await cursor.to_list(length=1000)
 
     async def has_seen_any_items(self, feed_id: int) -> bool:
