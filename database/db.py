@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -221,6 +222,26 @@ class Database:
             {"feed_id": feed_id}, {"$set": {"is_active": True}}
         )
         return feed_id, feed_title, True
+
+    async def get_feed_by_identifier(
+        self, feed_identifier: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Lookup a feed document by its numeric feed_id, exact url, or title substring.
+        """
+        feed_identifier = feed_identifier.strip()
+        if not feed_identifier:
+            return None
+        if feed_identifier.isdigit():
+            return await self.db.feeds.find_one({"feed_id": int(feed_identifier)})
+        return await self.db.feeds.find_one(
+            {
+                "$or": [
+                    {"url": feed_identifier},
+                    {"title": {"$regex": re.escape(feed_identifier), "$options": "i"}},
+                ]
+            }
+        )
 
     async def unsubscribe(
         self,

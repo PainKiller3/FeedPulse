@@ -74,6 +74,7 @@ class DiscordBotService:
                     "**Slash Commands:**\n"
                     "➕ `/add <url> [filter_include] [filter_exclude]` - Subscribe to a feed\n"
                     "📋 `/list` - List active feeds in this channel\n"
+                    "🔍 `/get <feed> [count]` - Preview live feed items immediately\n"
                     "⏸️ `/pause <id_or_all>` - Pause notifications for a feed or all feeds\n"
                     "▶️ `/resume <id_or_all>` - Resume notifications for a feed or all feeds\n"
                     "✏️ `/edit <id> [title] [include] [exclude] [url]` - Edit a feed in-place\n"
@@ -81,7 +82,7 @@ class DiscordBotService:
                     "🔍 `/filter <id> <include> <exclude>` - Set keyword filters\n"
                     "🔄 `/check` - Force an immediate feed check\n"
                     "🧪 `/test` - Preview a sample torrent alert\n\n"
-                    "*(Prefix commands like `!add <url>`, `!pause <id>`, `!resume <id>`, `!edit <id>` also work!)*"
+                    "*(Prefix commands like `!add <url>`, `!get <id>`, `!pause <id>`, `!resume <id>`, `!edit <id>` also work!)*"
                 ),
                 color=0x2ECC71,
             )
@@ -436,6 +437,126 @@ class DiscordBotService:
                 await interaction.response.send_message(
                     f"❌ No matching subscription found for `{feed_id}`."
                 )
+
+        @self.bot.tree.command(
+            name="get",
+            description="Inspect and preview live items from a feed right now",
+        )
+        @app_commands.describe(
+            feed="Feed ID (from /list) or full feed URL",
+            count="Number of latest items to preview (default: 5, max: 20)",
+        )
+        async def slash_get(
+            interaction: discord.Interaction,
+            feed: str,
+            count: Optional[int] = 5,
+        ):
+            await interaction.response.defer(thinking=True)
+            target_input = feed.strip()
+            item_count = max(1, min(count or 5, 20))
+
+            if target_input.startswith(("http://", "https://")):
+                feed_url = target_input
+                feed_label = target_input
+            else:
+                feed_doc = await self.db.get_feed_by_identifier(target_input)
+                if not feed_doc:
+                    await interaction.followup.send(
+                        f"❌ **Feed not found!** Could not find a feed matching `{target_input}`.\n"
+                        "Use `/list` to view your active feed IDs or provide a full URL."
+                    )
+                    return
+                feed_url = feed_doc["url"]
+                feed_label = feed_doc.get("title") or feed_url
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    (
+                        title,
+                        etag,
+                        modified,
+                        items,
+                        status,
+                    ) = await FeedParser.fetch_and_parse(session, feed_url)
+
+                if status != 200 or not items:
+                    await interaction.followup.send(
+                        f"❌ Failed to fetch feed (HTTP {status}). The feed may be offline or empty."
+                    )
+                    return
+
+                preview_items = items[:item_count]
+                feed_name = title or feed_label
+
+                embed = discord.Embed(
+                    title=f"📋 Feed Inspector: {feed_name[:200]}",
+                    url=feed_url
+                    if feed_url.startswith(("http://", "https://"))
+                    else None,
+                    description=f"Showing latest **{len(preview_items)}** of **{len(items)}** items",
+                    color=0x5865F2,
+                )
+
+                raw_lines = [
+                    f"Feed: {feed_name}",
+                    f"URL: {feed_url}",
+                    f"Items: {len(preview_items)}/{len(items)}",
+                    "=" * 40,
+                    "",
+                ]
+
+                total_field_chars = 0
+                for idx, item in enumerate(preview_items, 1):
+                    item_title = item.title.strip()
+                    val_parts = []
+                    if item.size_str:
+                        val_parts.append(f"📏 **Size:** {item.size_str}")
+                    if item.seeds is not None:
+                        val_parts.append(
+                            f"🌱 **Seeds:** {item.seeds} | **Leechers:** {item.leechers or 0}"
+                        )
+                    if item.published:
+                        val_parts.append(f"📅 **Date:** {item.published}")
+
+                    links = []
+                    if item.link:
+                        links.append(f"[Web Page]({item.link})")
+                    if item.torrent_url:
+                        links.append(f"[Torrent File]({item.torrent_url})")
+                    if links:
+                        val_parts.append("🔗 " + " | ".join(links))
+
+                    val_str = "\n".join(val_parts) or "No additional metadata"
+                    if len(val_str) > 1024:
+                        val_str = val_str[:1020] + "..."
+
+                    field_name = f"#{idx} {item_title}"
+                    if len(field_name) > 256:
+                        field_name = field_name[:252] + "..."
+
+                    total_field_chars += len(field_name) + len(val_str)
+                    if total_field_chars < 5500 and len(embed.fields) < 25:
+                        embed.add_field(name=field_name, value=val_str, inline=False)
+
+                    raw_lines.append(f"#{idx} {item_title}")
+                    if item.size_str:
+                        raw_lines.append(f"Size: {item.size_str}")
+                    if item.seeds is not None:
+                        raw_lines.append(
+                            f"Seeds: {item.seeds} | Leechers: {item.leechers}"
+                        )
+                    if item.published:
+                        raw_lines.append(f"Date: {item.published}")
+                    if item.link:
+                        raw_lines.append(f"Link: {item.link}")
+                    if item.magnet_uri:
+                        raw_lines.append(f"Magnet: {item.magnet_uri}")
+                    raw_lines.append("-" * 30)
+
+                await interaction.followup.send(embed=embed)
+            except Exception as e:
+                logger.error("Discord feed inspector error for %s: %s", feed_url, e)
+                await interaction.followup.send(f"❌ Error inspecting feed: {e}")
 
         @self.bot.tree.command(
             name="check", description="Force an immediate RSS feed check"
@@ -879,6 +1000,97 @@ class DiscordBotService:
                 await ctx.send(f"ℹ️ No changes made to `{feed_label or feed_id}`.")
             else:
                 await ctx.send(f"❌ Feed `{feed_id}` not found.")
+
+        @self.bot.command(name="get", aliases=["preview", "inspect"])
+        async def prefix_get(
+            ctx: commands.Context, feed: str, count: Optional[int] = 5
+        ):
+            target_input = feed.strip()
+            item_count = max(1, min(count or 5, 20))
+
+            if target_input.startswith(("http://", "https://")):
+                feed_url = target_input
+                feed_label = target_input
+            else:
+                feed_doc = await self.db.get_feed_by_identifier(target_input)
+                if not feed_doc:
+                    await ctx.send(
+                        f"❌ **Feed not found!** Could not find a feed matching `{target_input}`.\n"
+                        "Use `!list` to view your active feed IDs or provide a full URL."
+                    )
+                    return
+                feed_url = feed_doc["url"]
+                feed_label = feed_doc.get("title") or feed_url
+
+            status_msg = await ctx.send(f"⏳ *Inspecting live feed `{feed_label}`...*")
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    (
+                        title,
+                        etag,
+                        modified,
+                        items,
+                        status,
+                    ) = await FeedParser.fetch_and_parse(session, feed_url)
+
+                if status != 200 or not items:
+                    await status_msg.edit(
+                        content=f"❌ Failed to fetch feed (HTTP {status}). The feed may be offline or empty."
+                    )
+                    return
+
+                preview_items = items[:item_count]
+                feed_name = title or feed_label
+
+                embed = discord.Embed(
+                    title=f"📋 Feed Inspector: {feed_name[:200]}",
+                    url=feed_url
+                    if feed_url.startswith(("http://", "https://"))
+                    else None,
+                    description=f"Showing latest **{len(preview_items)}** of **{len(items)}** items",
+                    color=0x5865F2,
+                )
+
+                total_field_chars = 0
+                for idx, item in enumerate(preview_items, 1):
+                    item_title = item.title.strip()
+                    val_parts = []
+                    if item.size_str:
+                        val_parts.append(f"📏 **Size:** {item.size_str}")
+                    if item.seeds is not None:
+                        val_parts.append(
+                            f"🌱 **Seeds:** {item.seeds} | **Leechers:** {item.leechers or 0}"
+                        )
+                    if item.published:
+                        val_parts.append(f"📅 **Date:** {item.published}")
+
+                    links = []
+                    if item.link:
+                        links.append(f"[Web Page]({item.link})")
+                    if item.torrent_url:
+                        links.append(f"[Torrent File]({item.torrent_url})")
+                    if links:
+                        val_parts.append("🔗 " + " | ".join(links))
+
+                    val_str = "\n".join(val_parts) or "No additional metadata"
+                    if len(val_str) > 1024:
+                        val_str = val_str[:1020] + "..."
+
+                    field_name = f"#{idx} {item_title}"
+                    if len(field_name) > 256:
+                        field_name = field_name[:252] + "..."
+
+                    total_field_chars += len(field_name) + len(val_str)
+                    if total_field_chars < 5500 and len(embed.fields) < 25:
+                        embed.add_field(name=field_name, value=val_str, inline=False)
+
+                await status_msg.edit(content="", embed=embed)
+            except Exception as e:
+                logger.error(
+                    "Discord prefix get inspector error for %s: %s", feed_url, e
+                )
+                await status_msg.edit(content=f"❌ Error inspecting feed: {e}")
 
         @self.bot.command(name="check")
         async def prefix_check(ctx: commands.Context):

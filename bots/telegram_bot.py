@@ -1,4 +1,5 @@
 import html
+import io
 import logging
 from typing import Optional, List, Set, Tuple
 import aiohttp
@@ -95,6 +96,9 @@ class TelegramBotService:
         )
         self.application.add_handler(CommandHandler("edit", self.cmd_edit))
         self.application.add_handler(CommandHandler("filter", self.cmd_filter))
+        self.application.add_handler(
+            CommandHandler(["get", "preview", "inspect"], self.cmd_get)
+        )
         self.application.add_handler(CommandHandler("check", self.cmd_check))
         self.application.add_handler(CommandHandler("test", self.cmd_test))
 
@@ -113,6 +117,7 @@ class TelegramBotService:
             BotCommand("add", "Subscribe to an RSS/torrent feed"),
             BotCommand("list", "View active feed subscriptions"),
             BotCommand("myfeeds", "View your subscriptions across all chats"),
+            BotCommand("get", "Inspect live feed items immediately"),
             BotCommand("pause", "Pause notifications for a feed or 'all'"),
             BotCommand("resume", "Resume notifications for a feed or 'all'"),
             BotCommand("edit", "Edit a feed subscription in-place"),
@@ -1558,6 +1563,140 @@ class TelegramBotService:
                 f"❌ Subscription not found for <code>{html.escape(feed_identifier)}</code> in {dest_str}.\n"
                 "Use /list to see your active feed IDs."
             )
+
+    async def cmd_get(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Live Feed Inspector: Preview the latest items from a feed immediately.
+        Usage: /get <feed_id_or_url> [count]
+        """
+        if not await self.check_authorization(update, context):
+            return
+
+        if not context.args:
+            await update.effective_message.reply_html(
+                "ℹ️ <b>Live Feed Inspector</b>\n\n"
+                "Instantly preview the latest items from any feed without waiting for background checks.\n\n"
+                "<b>Usage:</b> <code>/get &lt;feed_id or url&gt; [count]</code>\n\n"
+                "<b>Examples:</b>\n"
+                "• <code>/get 1</code> (previews latest 5 items for feed #1)\n"
+                "• <code>/get 1 10</code> (previews latest 10 items)\n"
+                "• <code>/get https://example.com/rss/ 3</code>\n\n"
+                "<i>Use /list to find your feed IDs.</i>"
+            )
+            return
+
+        target_input = context.args[0].strip()
+        count = 5
+        if len(context.args) > 1 and context.args[1].isdigit():
+            count = max(1, min(int(context.args[1]), 20))
+
+        # Determine feed URL and Title
+        if target_input.startswith(("http://", "https://")):
+            feed_url = target_input
+            feed_label = target_input
+        else:
+            feed_doc = await self.db.get_feed_by_identifier(target_input)
+            if not feed_doc:
+                await update.effective_message.reply_html(
+                    f"❌ <b>Feed not found!</b> Could not find a feed matching <code>{html.escape(target_input)}</code>.\n"
+                    "Use <code>/list</code> to see your active feed IDs or provide a full URL."
+                )
+                return
+            feed_url = feed_doc["url"]
+            feed_label = feed_doc.get("title") or feed_url
+
+        status_msg = await update.effective_message.reply_html(
+            f"⏳ <i>Fetching live preview from <b>{html.escape(feed_label)}</b>...</i>"
+        )
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                title, etag, modified, items, status = await FeedParser.fetch_and_parse(
+                    session, feed_url
+                )
+
+            if status != 200 or not items:
+                await status_msg.edit_text(
+                    f"❌ Failed to fetch feed (HTTP {status}). Feed may be offline or empty."
+                )
+                return
+
+            preview_items = items[:count]
+            feed_name = title or feed_label
+
+            lines = [
+                f"📋 <b>Feed Inspector: {html.escape(feed_name)}</b>",
+                f"<i>Showing latest {len(preview_items)} of {len(items)} items</i>\n",
+            ]
+
+            raw_txt_lines = [
+                f"Feed: {feed_name}",
+                f"URL: {feed_url}",
+                f"Items: {len(preview_items)}/{len(items)}",
+                "=" * 40,
+                "",
+            ]
+
+            for idx, item in enumerate(preview_items, 1):
+                item_title = item.title.strip()
+                item_parts = [f"<b>#{idx}</b> {html.escape(item_title)}"]
+                if item.size_str:
+                    item_parts.append(f"📏 <b>Size:</b> {html.escape(item.size_str)}")
+                if item.seeds is not None:
+                    seeds_str = f"🌱 <b>Seeds:</b> {item.seeds}"
+                    if item.leechers is not None:
+                        seeds_str += f" | <b>Leechers:</b> {item.leechers}"
+                    item_parts.append(seeds_str)
+                if item.published:
+                    item_parts.append(f"📅 <b>Date:</b> {html.escape(item.published)}")
+
+                links = []
+                if item.link:
+                    links.append(f'<a href="{item.link}">View Page</a>')
+                if item.torrent_url:
+                    links.append(f'<a href="{item.torrent_url}">Download .torrent</a>')
+                if links:
+                    item_parts.append("🔗 " + " | ".join(links))
+                if item.magnet_uri:
+                    item_parts.append(f"🧲 <code>{html.escape(item.magnet_uri)}</code>")
+
+                lines.append("\n".join(item_parts) + "\n")
+
+                raw_txt_lines.append(f"#{idx} {item_title}")
+                if item.size_str:
+                    raw_txt_lines.append(f"Size: {item.size_str}")
+                if item.seeds is not None:
+                    raw_txt_lines.append(
+                        f"Seeds: {item.seeds} | Leechers: {item.leechers}"
+                    )
+                if item.published:
+                    raw_txt_lines.append(f"Date: {item.published}")
+                if item.link:
+                    raw_txt_lines.append(f"Link: {item.link}")
+                if item.magnet_uri:
+                    raw_txt_lines.append(f"Magnet: {item.magnet_uri}")
+                raw_txt_lines.append("-" * 30)
+
+            full_html = "\n".join(lines).strip()
+            if len(full_html.encode("utf-8")) > 4000:
+                raw_txt = "\n".join(raw_txt_lines)
+                with io.BytesIO(raw_txt.encode("utf-8")) as out_file:
+                    out_file.name = f"feed_inspector_{count}.txt"
+                    await update.effective_message.reply_document(
+                        document=out_file,
+                        caption=f"📋 Live preview for <b>{html.escape(feed_name)}</b> ({len(preview_items)} items)",
+                        parse_mode="HTML",
+                    )
+                await status_msg.delete()
+            else:
+                await status_msg.edit_text(
+                    full_html,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+        except Exception as e:
+            logger.error("Error inspecting feed %s: %s", feed_url, e)
+            await status_msg.edit_text(f"❌ Error fetching feed: {html.escape(str(e))}")
 
     async def cmd_check(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
