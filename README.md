@@ -142,6 +142,14 @@ You can fine-tune what torrents and posts trigger alerts using rich boolean logi
   /edit 1 -stv false
   ```
 
+- **File Size Filtering (`-maxsize` and `-minsize`):**
+  Filter items by minimum and maximum file size (supports units: `B`, `KB`, `MB`, `GB`, `TB`):
+  ```text
+  /add https://example.com/rss/ -minsize 500MB -maxsize 5GB
+  /edit 1 -maxsize 2.5GB
+  /edit 1 -maxsize none
+  ```
+
 ---
 
 ## ☁️ Cloud Deployment (Heroku, Render, Railway, Koyeb)

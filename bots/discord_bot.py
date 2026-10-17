@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database.db import Database
-from parser.feed_parser import FeedParser, FeedItem
+from parser.feed_parser import FeedParser, FeedItem, format_bytes, parse_size_bytes
 from services.dispatcher import NotificationDispatcher
 from services.poller import FeedPoller
 
@@ -100,6 +100,8 @@ class DiscordBotService:
             filter_include="Optional comma-separated keywords that MUST appear in the title",
             filter_exclude="Optional comma-separated keywords to ignore",
             case_sensitive="Strict case sensitivity for keyword filters (default False)",
+            max_size="Optional max file size limit (e.g. 5GB, 2000MB)",
+            min_size="Optional min file size limit (e.g. 500MB, 1GB)",
         )
         async def slash_add(
             interaction: discord.Interaction,
@@ -107,6 +109,8 @@ class DiscordBotService:
             filter_include: Optional[str] = None,
             filter_exclude: Optional[str] = None,
             case_sensitive: bool = False,
+            max_size: Optional[str] = None,
+            min_size: Optional[str] = None,
         ):
             await interaction.response.defer(thinking=True)
             url = url.strip()
@@ -115,6 +119,9 @@ class DiscordBotService:
                     "❌ Please provide a valid HTTP/HTTPS URL."
                 )
                 return
+
+            max_sz_bytes = parse_size_bytes(max_size) if max_size else None
+            min_sz_bytes = parse_size_bytes(min_size) if min_size else None
 
             try:
                 async with aiohttp.ClientSession() as session:
@@ -144,6 +151,8 @@ class DiscordBotService:
                     filter_keywords=filter_include,
                     filter_exclude=filter_exclude,
                     case_sensitive=case_sensitive,
+                    max_size=max_sz_bytes,
+                    min_size=min_sz_bytes,
                 )
 
                 self.poller.trigger_immediate_check()
@@ -172,6 +181,18 @@ class DiscordBotService:
                 if case_sensitive:
                     embed.add_field(
                         name="🔤 Case-Sensitive", value="Enabled", inline=True
+                    )
+                if min_sz_bytes:
+                    embed.add_field(
+                        name="📏 Min Size",
+                        value=format_bytes(min_sz_bytes),
+                        inline=True,
+                    )
+                if max_sz_bytes:
+                    embed.add_field(
+                        name="📏 Max Size",
+                        value=format_bytes(max_sz_bytes),
+                        inline=True,
                     )
 
                 embed.set_footer(
@@ -214,6 +235,13 @@ class DiscordBotService:
                     val += f"\n🚫 *Exclude:* `{s['filter_exclude']}`"
                 if s.get("case_sensitive"):
                     val += "\n🔤 *Case-Sensitive:* `Enabled`"
+                sz_items = []
+                if s.get("min_size"):
+                    sz_items.append(f"Min: {format_bytes(s['min_size'])}")
+                if s.get("max_size"):
+                    sz_items.append(f"Max: {format_bytes(s['max_size'])}")
+                if sz_items:
+                    val += f"\n📏 *Size Limit:* `{', '.join(sz_items)}`"
 
                 paused_tag = " ⏸️ [PAUSED]" if s.get("is_paused") else ""
                 embed.add_field(
@@ -322,6 +350,8 @@ class DiscordBotService:
             filter_exclude="Optional keywords to ignore (or 'none' to clear)",
             new_url="Optional new feed RSS/Atom URL",
             case_sensitive="Toggle case sensitivity for filters (True/False)",
+            max_size="Optional max file size limit (e.g. 5GB, 2000MB or 'none' to clear)",
+            min_size="Optional min file size limit (e.g. 500MB, 1GB or 'none' to clear)",
         )
         async def slash_edit(
             interaction: discord.Interaction,
@@ -331,6 +361,8 @@ class DiscordBotService:
             filter_exclude: Optional[str] = None,
             new_url: Optional[str] = None,
             case_sensitive: Optional[bool] = None,
+            max_size: Optional[str] = None,
+            min_size: Optional[str] = None,
         ):
             channel_id = str(interaction.channel_id)
             if not any(
@@ -341,12 +373,29 @@ class DiscordBotService:
                     filter_exclude,
                     new_url,
                     case_sensitive,
+                    max_size,
+                    min_size,
                 )
             ):
                 await interaction.response.send_message(
-                    "⚠️ Please specify at least one option to edit: `title`, `filter_include`, `filter_exclude`, `new_url`, or `case_sensitive`."
+                    "⚠️ Please specify at least one option to edit: `title`, `filter_include`, `filter_exclude`, `new_url`, `case_sensitive`, `max_size`, or `min_size`."
                 )
                 return
+
+            max_sz_val = (
+                -1
+                if max_size and max_size.lower() in ("none", "clear", "0")
+                else parse_size_bytes(max_size)
+                if max_size
+                else None
+            )
+            min_sz_val = (
+                -1
+                if min_size and min_size.lower() in ("none", "clear", "0")
+                else parse_size_bytes(min_size)
+                if min_size
+                else None
+            )
 
             feed_label, status, changed = await self.db.edit_subscription(
                 platform="discord",
@@ -357,6 +406,8 @@ class DiscordBotService:
                 filter_exclude=filter_exclude,
                 new_url=new_url,
                 case_sensitive=case_sensitive,
+                max_size=max_sz_val,
+                min_size=min_sz_val,
             )
 
             if status == "success":
@@ -434,7 +485,7 @@ class DiscordBotService:
         async def prefix_add(ctx: commands.Context, *args):
             if not args:
                 await ctx.send(
-                    "⚠️ Usage: `!add <feed_url> [-inf <include>] [-exf <exclude>] [-stv]`"
+                    "⚠️ Usage: `!add <feed_url> [-inf <include>] [-exf <exclude>] [-maxsize <size>] [-minsize <size>] [-stv]`"
                 )
                 return
 
@@ -442,6 +493,8 @@ class DiscordBotService:
             inf = None
             exf = None
             case_sensitive = False
+            max_size = None
+            min_size = None
 
             rem = list(args)
             for idx, a in enumerate(rem):
@@ -506,6 +559,26 @@ class DiscordBotService:
                     )
                     i += 1
                     continue
+                elif tok in ("-maxsize", "--maxsize", "-max", "--max"):
+                    i += 1
+                    if i < len(rem):
+                        max_size = parse_size_bytes(rem[i])
+                        i += 1
+                    continue
+                elif tok.startswith(("maxsize=", "max=")):
+                    max_size = parse_size_bytes(rem[i].split("=", 1)[1])
+                    i += 1
+                    continue
+                elif tok in ("-minsize", "--minsize", "-min", "--min"):
+                    i += 1
+                    if i < len(rem):
+                        min_size = parse_size_bytes(rem[i])
+                        i += 1
+                    continue
+                elif tok.startswith(("minsize=", "min=")):
+                    min_size = parse_size_bytes(rem[i].split("=", 1)[1])
+                    i += 1
+                    continue
                 i += 1
 
             try:
@@ -533,6 +606,8 @@ class DiscordBotService:
                     filter_keywords=inf,
                     filter_exclude=exf,
                     case_sensitive=case_sensitive,
+                    max_size=max_size,
+                    min_size=min_size,
                 )
                 self.poller.trigger_immediate_check()
                 status_str = "Subscribed" if is_new else "Already subscribed to"
@@ -543,6 +618,10 @@ class DiscordBotService:
                     msg += f"\n🚫 Excluded: `{exf}`"
                 if case_sensitive:
                     msg += "\n🔤 Case-Sensitive: `Enabled`"
+                if min_size:
+                    msg += f"\n📏 Min Size: `{format_bytes(min_size)}`"
+                if max_size:
+                    msg += f"\n📏 Max Size: `{format_bytes(max_size)}`"
                 await ctx.send(msg)
             except Exception as e:
                 await ctx.send(f"❌ Error: {e}")
@@ -558,7 +637,12 @@ class DiscordBotService:
             for s in subs:
                 paused_tag = " ⏸️ [PAUSED]" if s.get("is_paused") else ""
                 cs_tag = " [Case-Sensitive]" if s.get("case_sensitive") else ""
-                msg += f"• **[{s['feed_id']}]** {s['title']}{paused_tag}{cs_tag} - `<{s['url']}>\n`"
+                sz_tag = (
+                    f" [Size: {format_bytes(s.get('min_size')) or '0 B'} - {format_bytes(s.get('max_size')) or 'Any'}]"
+                    if (s.get("min_size") or s.get("max_size"))
+                    else ""
+                )
+                msg += f"• **[{s['feed_id']}]** {s['title']}{paused_tag}{cs_tag}{sz_tag} - `<{s['url']}>\n`"
             msg += "\n*Manage:* `!pause <id>` | `!resume <id>` | `!edit <id>` | `!remove <id>`"
             await ctx.send(msg)
 
@@ -628,7 +712,7 @@ class DiscordBotService:
         ):
             if not feed_id or not args:
                 await ctx.send(
-                    "⚠️ Usage: `!edit <feed_id> [-title <name>] [-inf <include>] [-exf <exclude>] [-url <new_url>] [-stv]`"
+                    "⚠️ Usage: `!edit <feed_id> [-title <name>] [-inf <include>] [-exf <exclude>] [-url <new_url>] [-maxsize <size>] [-minsize <size>] [-stv]`"
                 )
                 return
 
@@ -638,6 +722,8 @@ class DiscordBotService:
             exf = None
             new_url = None
             case_sensitive = None
+            max_size = None
+            min_size = None
 
             rem = list(args)
             i = 0
@@ -715,13 +801,58 @@ class DiscordBotService:
                     )
                     i += 1
                     continue
+                elif tok in ("-maxsize", "--maxsize", "-max", "--max"):
+                    i += 1
+                    if i < len(rem):
+                        val = rem[i].lower()
+                        max_size = (
+                            -1
+                            if val in ("none", "clear", "0")
+                            else parse_size_bytes(rem[i])
+                        )
+                        i += 1
+                    continue
+                elif tok.startswith(("maxsize=", "max=")):
+                    val = rem[i].split("=", 1)[1].lower()
+                    max_size = (
+                        -1 if val in ("none", "clear", "0") else parse_size_bytes(val)
+                    )
+                    i += 1
+                    continue
+                elif tok in ("-minsize", "--minsize", "-min", "--min"):
+                    i += 1
+                    if i < len(rem):
+                        val = rem[i].lower()
+                        min_size = (
+                            -1
+                            if val in ("none", "clear", "0")
+                            else parse_size_bytes(rem[i])
+                        )
+                        i += 1
+                    continue
+                elif tok.startswith(("minsize=", "min=")):
+                    val = rem[i].split("=", 1)[1].lower()
+                    min_size = (
+                        -1 if val in ("none", "clear", "0") else parse_size_bytes(val)
+                    )
+                    i += 1
+                    continue
                 i += 1
 
             if not any(
-                x is not None for x in (title, inf, exf, new_url, case_sensitive)
+                x is not None
+                for x in (
+                    title,
+                    inf,
+                    exf,
+                    new_url,
+                    case_sensitive,
+                    max_size,
+                    min_size,
+                )
             ):
                 await ctx.send(
-                    "⚠️ Please specify at least one option to edit: `-title`, `-inf`, `-exf`, `-url`, or `-stv`."
+                    "⚠️ Please specify at least one option to edit: `-title`, `-inf`, `-exf`, `-url`, `-stv`, `-maxsize`, or `-minsize`."
                 )
                 return
 
@@ -734,6 +865,8 @@ class DiscordBotService:
                 filter_exclude=exf,
                 new_url=new_url,
                 case_sensitive=case_sensitive,
+                max_size=max_size,
+                min_size=min_size,
             )
 
             if status == "success":

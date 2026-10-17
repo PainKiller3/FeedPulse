@@ -252,6 +252,23 @@ class FeedPoller:
                 )
                 continue
 
+            # Check size limit filtering
+            max_size = sub.get("max_size")
+            min_size = sub.get("min_size")
+            if not FeedParser.matches_size_filter(
+                item.size_bytes, min_size=min_size, max_size=max_size
+            ):
+                logger.debug(
+                    "Item '%s' (%s bytes) filtered out by size limits (min=%s, max=%s) for subscriber %s:%s",
+                    item.title,
+                    item.size_bytes,
+                    min_size,
+                    max_size,
+                    platform,
+                    target_id,
+                )
+                continue
+
             # Prevent duplicate alerts to the same chat/topic when multiple users subscribe to the same feed
             dest_key = (platform, target_id, thread_id)
             if dest_key in sent_destinations:

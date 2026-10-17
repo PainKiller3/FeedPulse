@@ -715,3 +715,20 @@ class FeedParser:
                         return False
 
         return True
+
+    @staticmethod
+    def matches_size_filter(
+        size_bytes: Optional[int],
+        min_size: Optional[int] = None,
+        max_size: Optional[int] = None,
+    ) -> bool:
+        """
+        Check if an item's byte size satisfies minimum and maximum size constraints.
+        If the item has unknown size (None), it is not rejected.
+        """
+        if size_bytes is not None:
+            if min_size is not None and size_bytes < min_size:
+                return False
+            if max_size is not None and size_bytes > max_size:
+                return False
+        return True

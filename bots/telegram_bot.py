@@ -6,7 +6,7 @@ from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 from database.db import Database
-from parser.feed_parser import FeedParser, FeedItem
+from parser.feed_parser import FeedParser, FeedItem, format_bytes, parse_size_bytes
 from services.dispatcher import NotificationDispatcher
 from services.poller import FeedPoller
 
@@ -357,7 +357,7 @@ class TelegramBotService:
                 break
 
         if not url or url_idx == -1:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None, None
 
         custom_title = " ".join(args[:url_idx]).strip() or None
 
@@ -366,6 +366,8 @@ class TelegramBotService:
         inc_filter = None
         exc_filter = None
         case_sensitive = False
+        max_size = None
+        min_size = None
 
         rem = args[url_idx + 1 :]
         i = 0
@@ -460,6 +462,32 @@ class TelegramBotService:
                 i += 1
                 continue
 
+            elif lower in ("-maxsize", "--maxsize", "-max", "--max"):
+                i += 1
+                if i < len(rem):
+                    max_size = parse_size_bytes(rem[i])
+                    i += 1
+                continue
+
+            elif lower.startswith(("maxsize=", "max=")):
+                val = token.split("=", 1)[1].strip()
+                max_size = parse_size_bytes(val)
+                i += 1
+                continue
+
+            elif lower in ("-minsize", "--minsize", "-min", "--min"):
+                i += 1
+                if i < len(rem):
+                    min_size = parse_size_bytes(rem[i])
+                    i += 1
+                continue
+
+            elif lower.startswith(("minsize=", "min=")):
+                val = token.split("=", 1)[1].strip()
+                min_size = parse_size_bytes(val)
+                i += 1
+                continue
+
             elif token.startswith("@") or (
                 token.startswith("-100") and token[1:].isdigit()
             ):
@@ -498,6 +526,8 @@ class TelegramBotService:
             inc_filter,
             exc_filter,
             case_sensitive,
+            max_size,
+            min_size,
         )
 
     async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -517,6 +547,8 @@ class TelegramBotService:
             inc_filter,
             exc_filter,
             case_sensitive,
+            max_size,
+            min_size,
         ) = self._parse_add_args(context.args or [])
         if not url:
             await update.effective_message.reply_html(
@@ -576,6 +608,8 @@ class TelegramBotService:
                 user_id=user_id,
                 custom_title=custom_title,
                 case_sensitive=case_sensitive,
+                max_size=max_size,
+                min_size=min_size,
             )
 
             # Signal poller to register and track
@@ -598,6 +632,14 @@ class TelegramBotService:
                 )
             if case_sensitive:
                 filter_lines.append("🔤 <b>Case-Sensitive:</b> <code>Enabled</code>")
+            if min_size:
+                filter_lines.append(
+                    f"📏 <b>Min Size:</b> <code>{format_bytes(min_size)}</code>"
+                )
+            if max_size:
+                filter_lines.append(
+                    f"📏 <b>Max Size:</b> <code>{format_bytes(max_size)}</code>"
+                )
             filters_str = ("\n" + "\n".join(filter_lines)) if filter_lines else ""
 
             if is_new:
@@ -683,6 +725,13 @@ class TelegramBotService:
                 lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
             if s.get("case_sensitive"):
                 lines.append("  🔤 <i>Case-Sensitive: Enabled</i>")
+            sz_items = []
+            if s.get("min_size"):
+                sz_items.append(f"Min: {format_bytes(s['min_size'])}")
+            if s.get("max_size"):
+                sz_items.append(f"Max: {format_bytes(s['max_size'])}")
+            if sz_items:
+                lines.append(f"  📏 <i>Size: {', '.join(sz_items)}</i>")
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
         lines.append(
@@ -786,6 +835,13 @@ class TelegramBotService:
                 lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
             if s.get("case_sensitive"):
                 lines.append("  🔤 <i>Case-Sensitive: Enabled</i>")
+            sz_items = []
+            if s.get("min_size"):
+                sz_items.append(f"Min: {format_bytes(s['min_size'])}")
+            if s.get("max_size"):
+                sz_items.append(f"Max: {format_bytes(s['max_size'])}")
+            if sz_items:
+                lines.append(f"  📏 <i>Size: {', '.join(sz_items)}</i>")
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
         lines.append(
@@ -1263,6 +1319,46 @@ class TelegramBotService:
                 i += 1
                 continue
 
+            elif lower in ("-maxsize", "--maxsize", "-max", "--max"):
+                i += 1
+                if i < len(rem):
+                    val = rem[i].strip().lower()
+                    max_size = (
+                        -1
+                        if val in ("none", "clear", "0")
+                        else parse_size_bytes(rem[i])
+                    )
+                    i += 1
+                continue
+
+            elif lower.startswith(("maxsize=", "max=")):
+                val = token.split("=", 1)[1].strip().lower()
+                max_size = (
+                    -1 if val in ("none", "clear", "0") else parse_size_bytes(val)
+                )
+                i += 1
+                continue
+
+            elif lower in ("-minsize", "--minsize", "-min", "--min"):
+                i += 1
+                if i < len(rem):
+                    val = rem[i].strip().lower()
+                    min_size = (
+                        -1
+                        if val in ("none", "clear", "0")
+                        else parse_size_bytes(rem[i])
+                    )
+                    i += 1
+                continue
+
+            elif lower.startswith(("minsize=", "min=")):
+                val = token.split("=", 1)[1].strip().lower()
+                min_size = (
+                    -1 if val in ("none", "clear", "0") else parse_size_bytes(val)
+                )
+                i += 1
+                continue
+
             elif token.startswith("@") or (
                 token.startswith("-100") and token[1:].isdigit()
             ):
@@ -1300,6 +1396,8 @@ class TelegramBotService:
             exc_filter,
             new_url,
             case_sensitive,
+            max_size,
+            min_size,
             target_arg,
             thread_arg,
         )
@@ -1313,6 +1411,7 @@ class TelegramBotService:
         • /edit <feed_id> -inf 1080p,flac -exf cam,hindi
         • /edit <feed_id> -url https://new-feed-url.com/rss
         • /edit <feed_id> -stv true
+        • /edit <feed_id> -maxsize 5GB -minsize 500MB
         • /edit <feed_id> -inf none (clear filter)
         """
         if not await self.check_authorization(update, context):
@@ -1325,11 +1424,13 @@ class TelegramBotService:
                 "• /edit &lt;feed_id&gt; -inf &lt;include_words&gt; [-exf &lt;exclude_words&gt;]\n"
                 "• /edit &lt;feed_id&gt; -url &lt;new_rss_url&gt;\n"
                 "• /edit &lt;feed_id&gt; -stv &lt;true/false&gt;\n"
+                "• /edit &lt;feed_id&gt; -maxsize &lt;size|none&gt; [-minsize &lt;size|none&gt;]\n"
                 "• /edit &lt;feed_id&gt; [flags] [@channel_or_chat_id]\n\n"
                 "<b>Examples:</b>\n"
                 "• Change title: <code>/edit 1 -title PSA Movies</code>\n"
                 "• Update filters: <code>/edit 1 -inf 1080p,flac -exf 720p,cam</code>\n"
                 "• Toggle case: <code>/edit 1 -stv true</code>\n"
+                "• Set size limits: <code>/edit 1 -maxsize 4GB -minsize 700MB</code>\n"
                 "• Clear a filter: <code>/edit 1 -exf none</code>\n"
                 "• Reset custom title: <code>/edit 1 -title none</code>"
             )
@@ -1346,13 +1447,23 @@ class TelegramBotService:
             exc_filter,
             new_url,
             case_sensitive,
+            max_size,
+            min_size,
             target_arg,
             thread_arg,
         ) = self._parse_edit_args(context.args)
 
         if not any(
             x is not None
-            for x in (new_title, inc_filter, exc_filter, new_url, case_sensitive)
+            for x in (
+                new_title,
+                inc_filter,
+                exc_filter,
+                new_url,
+                case_sensitive,
+                max_size,
+                min_size,
+            )
         ):
             await update.effective_message.reply_html(
                 "⚠️ <b>No changes specified!</b>\n\n"
@@ -1361,7 +1472,9 @@ class TelegramBotService:
                 "• <code>-inf &lt;include keywords&gt;</code>\n"
                 "• <code>-exf &lt;exclude keywords&gt;</code>\n"
                 "• <code>-url &lt;new url&gt;</code>\n"
-                "• <code>-stv &lt;true/false&gt;</code>"
+                "• <code>-stv &lt;true/false&gt;</code>\n"
+                "• <code>-maxsize &lt;size|none&gt;</code>\n"
+                "• <code>-minsize &lt;size|none&gt;</code>"
             )
             return
 
@@ -1384,6 +1497,8 @@ class TelegramBotService:
             filter_exclude=exc_filter,
             new_url=new_url,
             case_sensitive=case_sensitive,
+            max_size=max_size,
+            min_size=min_size,
             thread_id=thread_id,
             user_id=user_id,
             is_admin=is_admin,
@@ -1413,6 +1528,14 @@ class TelegramBotService:
             if "case_sensitive" in changed:
                 lines.append(
                     f"• 🔤 <b>Case-Sensitive:</b> {html.escape(changed['case_sensitive'])}"
+                )
+            if "max_size" in changed:
+                lines.append(
+                    f"• 📏 <b>Max Size:</b> {html.escape(str(changed['max_size']))}"
+                )
+            if "min_size" in changed:
+                lines.append(
+                    f"• 📏 <b>Min Size:</b> {html.escape(str(changed['min_size']))}"
                 )
 
             await update.effective_message.reply_html(

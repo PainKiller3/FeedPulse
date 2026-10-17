@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ReturnDocument, ASCENDING
 from pymongo.errors import DuplicateKeyError, BulkWriteError
+from parser.feed_parser import format_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,8 @@ class Database:
         user_id: Optional[int] = None,
         custom_title: Optional[str] = None,
         case_sensitive: bool = False,
+        max_size: Optional[int] = None,
+        min_size: Optional[int] = None,
     ) -> Tuple[int, str, bool]:
         """
         Subscribe a target (chat, channel, topic, and user) to a feed.
@@ -184,6 +187,10 @@ class Database:
                 update_fields["custom_title"] = custom_title
             if case_sensitive is not None:
                 update_fields["case_sensitive"] = case_sensitive
+            if max_size is not None:
+                update_fields["max_size"] = max_size if max_size > 0 else None
+            if min_size is not None:
+                update_fields["min_size"] = min_size if min_size > 0 else None
             if update_fields:
                 await self.db.subscriptions.update_one(
                     {"_id": existing["_id"]}, {"$set": update_fields}
@@ -198,6 +205,8 @@ class Database:
             "user_id": user_id,
             "custom_title": custom_title,
             "case_sensitive": case_sensitive,
+            "max_size": max_size if max_size and max_size > 0 else None,
+            "min_size": min_size if min_size and min_size > 0 else None,
             "filter_keywords": filter_keywords,
             "filter_exclude": filter_exclude,
             "created_at": datetime.now(timezone.utc),
@@ -505,6 +514,8 @@ class Database:
         filter_exclude: Optional[str] = None,
         new_url: Optional[str] = None,
         case_sensitive: Optional[bool] = None,
+        max_size: Optional[int] = None,
+        min_size: Optional[int] = None,
         thread_id: Optional[int] = None,
         user_id: Optional[int] = None,
         is_admin: bool = False,
@@ -610,6 +621,22 @@ class Database:
                 else "Disabled (case-insensitive)"
             )
 
+        if max_size is not None:
+            if max_size <= 0:
+                update_fields["max_size"] = None
+                changed_summary["max_size"] = "Cleared (unlimited)"
+            else:
+                update_fields["max_size"] = max_size
+                changed_summary["max_size"] = format_bytes(max_size)
+
+        if min_size is not None:
+            if min_size <= 0:
+                update_fields["min_size"] = None
+                changed_summary["min_size"] = "Cleared (no minimum)"
+            else:
+                update_fields["min_size"] = min_size
+                changed_summary["min_size"] = format_bytes(min_size)
+
         if (
             new_url is not None
             and new_url.strip()
@@ -689,6 +716,8 @@ class Database:
                     "user_id": "$user_id",
                     "is_paused": "$is_paused",
                     "case_sensitive": "$case_sensitive",
+                    "max_size": "$max_size",
+                    "min_size": "$min_size",
                     "created_at": "$created_at",
                 }
             },
@@ -727,6 +756,8 @@ class Database:
                     "last_checked": "$feed_info.last_checked",
                     "is_paused": "$is_paused",
                     "case_sensitive": "$case_sensitive",
+                    "max_size": "$max_size",
+                    "min_size": "$min_size",
                     "created_at": "$created_at",
                 }
             },
