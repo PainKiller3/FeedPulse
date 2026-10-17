@@ -24,6 +24,7 @@ Both **Telegram** and **Discord** (slash commands + prefix `!`) support the exac
 | Command | Description | Example |
 | :--- | :--- | :--- |
 | `/start` or `/help` | Displays help message and quick-start guide | `/help` |
+| `/menu` | Open interactive button Control Center (Telegram) | `/menu` |
 | `/add <url>` | Subscribe current chat/channel to an RSS feed | `/add https://example.com/rss/feed.xml` |
 | `/list` | List all feeds monitored in this chat/channel | `/list` |
 | `/get <id_or_url> [count]` | Inspect & preview live items from a feed immediately | `/get 1 5` or `/get https://... 3` |

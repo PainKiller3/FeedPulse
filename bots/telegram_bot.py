@@ -4,8 +4,14 @@ import logging
 import shlex
 from typing import Optional, List, Set, Tuple
 import aiohttp
-from telegram import BotCommand, Update
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
 from database.db import Database
 from parser.feed_parser import FeedParser, FeedItem, format_bytes, parse_size_bytes
@@ -82,6 +88,9 @@ class TelegramBotService:
 
         # Register command handlers
         self.application.add_handler(CommandHandler(["start", "help"], self.cmd_help))
+        self.application.add_handler(
+            CommandHandler(["menu", "panel", "control", "rss"], self.cmd_rss_menu)
+        )
         self.application.add_handler(CommandHandler("id", self.cmd_id))
         self.application.add_handler(CommandHandler("add", self.cmd_add))
         self.application.add_handler(CommandHandler(["list", "feeds"], self.cmd_list))
@@ -102,6 +111,9 @@ class TelegramBotService:
         )
         self.application.add_handler(CommandHandler("check", self.cmd_check))
         self.application.add_handler(CommandHandler("test", self.cmd_test))
+        self.application.add_handler(
+            CallbackQueryHandler(self.handle_menu_callback, pattern="^rss_")
+        )
 
         await self.application.initialize()
         await self.application.start()
@@ -115,6 +127,7 @@ class TelegramBotService:
 
         # Automatically register command autocompletion menu with Telegram
         commands = [
+            BotCommand("menu", "Open interactive Control Center"),
             BotCommand("add", "Subscribe to an RSS/torrent feed"),
             BotCommand("list", "View active feed subscriptions"),
             BotCommand("myfeeds", "View your subscriptions across all chats"),
@@ -280,9 +293,11 @@ class TelegramBotService:
             "Real-time RSS & BitTorrent notifications with file sizes, seeds, "
             "direct <code>.torrent</code> downloads, and 1-click Magnet links!\n\n"
             "<b>Available Commands:</b>\n"
+            "🎛️ /menu — Open interactive Control Center\n"
             "➕ /add [title] &lt;url&gt; [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [chat/channel] [topic_id]\n"
             "📋 /list [all] [chat/channel] — View your subscribed feeds (or all feeds if admin)\n"
             "👤 /myfeeds — View all your subscriptions across all chats\n"
+            "🔍 /get &lt;id_or_url&gt; [count] — Inspect live feed items right now\n"
             "⏸️ /pause &lt;id_or_all&gt; [chat/channel] — Pause notifications\n"
             "▶️ /resume &lt;id_or_all&gt; [chat/channel] — Resume notifications\n"
             "✏️ /edit &lt;id&gt; [-title &lt;name&gt;] [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [-url &lt;new_url&gt;] — Edit feed in-place\n"
@@ -292,6 +307,8 @@ class TelegramBotService:
             "🧪 /test [chat/channel] — Preview sample torrent notification\n"
             "🆔 /id — Display Chat ID, Topic ID, and your User ID\n\n"
             "<b>Examples:</b>\n"
+            "• Open the interactive Control Center:\n"
+            "  /menu\n"
             "• Subscribe with custom title & include filter:\n"
             "  /add PSA https://www.limetorrents.fun/rss/ -inf PSA\n"
             "• Subscribe a channel with include & exclude filters:\n"
@@ -312,7 +329,21 @@ class TelegramBotService:
             "• List all your feeds across all chats:\n"
             "  /myfeeds"
         )
-        await update.effective_message.reply_html(text, disable_web_page_preview=True)
+        user = update.effective_user
+        user_id = user.id if user else 0
+        reply_markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🎛️ Open Control Center",
+                        callback_data=f"rss_main_{user_id}",
+                    )
+                ]
+            ]
+        )
+        await update.effective_message.reply_html(
+            text, reply_markup=reply_markup, disable_web_page_preview=True
+        )
 
     async def cmd_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Display Telegram User ID, Chat ID, and Topic / Thread ID."""
@@ -1935,3 +1966,339 @@ class TelegramBotService:
             await update.effective_message.reply_html(
                 f"✅ Test alert sent to <b>{html.escape(target_title)}</b>!"
             )
+
+    async def _build_main_menu(
+        self, user_id: int, chat_id: int, chat_title: str
+    ) -> Tuple[str, InlineKeyboardMarkup]:
+        """Build the main RSS interactive menu text and inline keyboard."""
+        chat_subs = await self.db.list_subscriptions("telegram", str(chat_id))
+        user_subs = await self.db.list_user_all_subscriptions(user_id)
+        role = (
+            "Bot Owner"
+            if user_id == self.owner_id
+            else ("Sudo User" if user_id in self.sudo_users else "User")
+        )
+
+        text = (
+            "⚡ <b>FeedPulse Control Center</b>\n\n"
+            f"📍 <b>Location:</b> {html.escape(chat_title)}\n"
+            f"📊 <b>Active in this chat:</b> {len(chat_subs)} feeds\n"
+            f"👤 <b>Your total feeds:</b> {len(user_subs)} feeds\n"
+            f"⏱️ <b>Check Interval:</b> every {POLL_INTERVAL_SECONDS}s\n"
+            f"🛡️ <b>Role:</b> {role}\n\n"
+            "<i>Select an action below to manage feeds interactively:</i>"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"📋 Chat Feeds ({len(chat_subs)})",
+                    callback_data=f"rss_list_{user_id}",
+                ),
+                InlineKeyboardButton(
+                    f"👤 My Feeds ({len(user_subs)})",
+                    callback_data=f"rss_myfeeds_{user_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⏸️ Pause All", callback_data=f"rss_pauseall_{user_id}"
+                ),
+                InlineKeyboardButton(
+                    "▶️ Resume All", callback_data=f"rss_resumeall_{user_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Check Now", callback_data=f"rss_check_{user_id}"
+                ),
+                InlineKeyboardButton(
+                    "🧪 Test Alert", callback_data=f"rss_test_{user_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "ℹ️ Help & Guide", callback_data=f"rss_help_{user_id}"
+                ),
+                InlineKeyboardButton("❌ Close", callback_data=f"rss_close_{user_id}"),
+            ],
+        ]
+        return text, InlineKeyboardMarkup(keyboard)
+
+    async def cmd_rss_menu(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Display the interactive RSS Control Center menu."""
+        if not await self.check_authorization(update, context):
+            return
+
+        user = update.effective_user
+        chat = update.effective_chat
+        user_id = user.id if user else 0
+        chat_id = chat.id if chat else 0
+        chat_title = chat.title or (
+            f"@{chat.username}" if chat.username else f"Chat {chat_id}"
+        )
+
+        text, reply_markup = await self._build_main_menu(user_id, chat_id, chat_title)
+        await update.effective_message.reply_html(
+            text, reply_markup=reply_markup, disable_web_page_preview=True
+        )
+
+    async def handle_menu_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle inline button clicks from the RSS Control Center."""
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        parts = query.data.split("_")
+        # format: rss_<action>_<creator_user_id>
+        if len(parts) < 3:
+            await query.answer()
+            return
+
+        action = parts[1]
+        creator_id = int(parts[2]) if parts[2].isdigit() else 0
+        user = update.effective_user
+        user_id = user.id if user else 0
+        chat = update.effective_chat
+        chat_id = chat.id if chat else 0
+        chat_title = chat.title or (
+            f"@{chat.username}" if chat.username else f"Chat {chat_id}"
+        )
+
+        # Access check: Only creator, sudo, owner or group admin can click
+        if user_id != creator_id and not self.is_super_user(user_id):
+            is_admin = False
+            if chat and chat.type in ("group", "supergroup"):
+                try:
+                    member = await chat.get_member(user_id)
+                    is_admin = member.status in ("creator", "administrator")
+                except Exception:
+                    pass
+            if not is_admin:
+                await query.answer(
+                    "⛔ This menu belongs to another user. Type /rss to open your own!",
+                    show_alert=True,
+                )
+                return
+
+        back_button = [
+            [
+                InlineKeyboardButton(
+                    "🔙 Back to Menu", callback_data=f"rss_main_{creator_id}"
+                )
+            ]
+        ]
+
+        if action == "close":
+            await query.answer("Menu closed.")
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return
+
+        elif action == "main":
+            await query.answer()
+            text, reply_markup = await self._build_main_menu(
+                creator_id, chat_id, chat_title
+            )
+            try:
+                await query.edit_message_text(
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "check":
+            self.poller.trigger_immediate_check()
+            await query.answer(
+                "🔄 Immediate feed check cycle triggered!", show_alert=True
+            )
+            return
+
+        elif action == "test":
+            await query.answer("🧪 Generating sample alert...")
+            sample_item = FeedItem(
+                title="Ubuntu 24.04 LTS Desktop (64-bit)",
+                link="https://example.com/item/101",
+                guid="test-sample-guid-101",
+                item_key="ih:2CB48F2892F15B77866F7776BD34219B0C499C1D",
+                category="Linux / OS",
+                size_str="4.80 GB",
+                size_bytes=5153960755,
+                seeds=125,
+                leechers=30,
+                torrent_url="https://example.com/downloads/ubuntu.torrent",
+                info_hash="2CB48F2892F15B77866F7776BD34219B0C499C1D",
+                magnet_uri=FeedParser.build_magnet_uri(
+                    "2CB48F2892F15B77866F7776BD34219B0C499C1D",
+                    "Ubuntu 24.04 LTS Desktop (64-bit)",
+                ),
+            )
+            text, reply_markup = self.dispatcher.format_telegram_message(
+                sample_item, "Sample RSS Feed (Preview)"
+            )
+            await query.message.reply_html(
+                text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+            return
+
+        elif action == "pauseall":
+            feed_label, status, count = await self.db.set_subscription_pause(
+                "telegram", str(chat_id), "all", paused=True
+            )
+            if count > 0:
+                await query.answer(
+                    f"⏸️ Paused {count} feeds in this chat!", show_alert=True
+                )
+            else:
+                await query.answer("ℹ️ No feeds to pause.", show_alert=True)
+            text, reply_markup = await self._build_main_menu(
+                creator_id, chat_id, chat_title
+            )
+            try:
+                await query.edit_message_text(
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "resumeall":
+            feed_label, status, count = await self.db.set_subscription_pause(
+                "telegram", str(chat_id), "all", paused=False
+            )
+            if count > 0:
+                await query.answer(
+                    f"▶️ Resumed {count} feeds in this chat!", show_alert=True
+                )
+            else:
+                await query.answer("ℹ️ No paused feeds to resume.", show_alert=True)
+            text, reply_markup = await self._build_main_menu(
+                creator_id, chat_id, chat_title
+            )
+            try:
+                await query.edit_message_text(
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "list":
+            await query.answer()
+            chat_subs = await self.db.list_subscriptions("telegram", str(chat_id))
+            if not chat_subs:
+                content = (
+                    "📋 <b>Feeds in this Chat:</b>\n\n"
+                    "<i>No active feeds subscribed in this chat.</i>\n"
+                    "Use <code>/add &lt;url&gt;</code> to subscribe!"
+                )
+            else:
+                lines = [
+                    f"📋 <b>Feeds in {html.escape(chat_title)} ({len(chat_subs)}):</b>\n"
+                ]
+                for sub in chat_subs[:15]:
+                    status_icon = "⏸️" if sub.get("is_paused") else "🟢"
+                    custom = sub.get("custom_title")
+                    title = custom if custom else (sub.get("title") or "Unnamed Feed")
+                    sz = ""
+                    if sub.get("min_size") or sub.get("max_size"):
+                        sz = f" [📏 {format_bytes(sub.get('min_size')) or '0 B'} - {format_bytes(sub.get('max_size')) or 'Any'}]"
+                    lines.append(
+                        f"• {status_icon} <b>#{sub['feed_id']}</b> {html.escape(title)}{sz}\n"
+                        f"  <code>{html.escape(sub['url'])}</code>"
+                    )
+                content = "\n\n".join(lines)
+                if len(chat_subs) > 15:
+                    content += f"\n\n<i>...and {len(chat_subs) - 15} more. Use /list to see all.</i>"
+
+            try:
+                await query.edit_message_text(
+                    content,
+                    reply_markup=InlineKeyboardMarkup(back_button),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "myfeeds":
+            await query.answer()
+            user_subs = await self.db.list_user_all_subscriptions(user_id)
+            if not user_subs:
+                content = (
+                    "👤 <b>Your Subscriptions:</b>\n\n"
+                    "<i>You have not added any feeds yet.</i>\n"
+                    "Use <code>/add &lt;url&gt;</code> to start monitoring!"
+                )
+            else:
+                lines = [
+                    f"👤 <b>Your Subscriptions Across All Chats ({len(user_subs)}):</b>\n"
+                ]
+                for sub in user_subs[:15]:
+                    status_icon = "⏸️" if sub.get("is_paused") else "🟢"
+                    custom = sub.get("custom_title")
+                    title = custom if custom else (sub.get("title") or "Unnamed Feed")
+                    chat_lbl = sub.get("target_id")
+                    lines.append(
+                        f"• {status_icon} <b>#{sub['feed_id']}</b> {html.escape(title)} (Chat: <code>{chat_lbl}</code>)\n"
+                        f"  <code>{html.escape(sub['url'])}</code>"
+                    )
+                content = "\n\n".join(lines)
+                if len(user_subs) > 15:
+                    content += f"\n\n<i>...and {len(user_subs) - 15} more. Use /myfeeds to see all.</i>"
+
+            try:
+                await query.edit_message_text(
+                    content,
+                    reply_markup=InlineKeyboardMarkup(back_button),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
+
+        elif action == "help":
+            await query.answer()
+            help_text = (
+                "ℹ️ <b>FeedPulse Commands Quick Reference:</b>\n\n"
+                "• <code>/menu</code> — Interactive Control Center\n"
+                "• <code>/add &lt;url&gt;</code> — Add single or multi-line feeds\n"
+                "• <code>/list</code> — View active subscriptions\n"
+                "• <code>/get &lt;id|url&gt; [count]</code> — Live feed inspector\n"
+                "• <code>/edit &lt;id&gt;</code> — In-place feed editor\n"
+                "• <code>/pause &lt;id|all&gt;</code> — Pause notifications\n"
+                "• <code>/resume &lt;id|all&gt;</code> — Resume notifications\n"
+                "• <code>/remove &lt;id&gt;</code> — Unsubscribe\n"
+                "• <code>/filter &lt;id&gt;</code> — Update keywords\n"
+                "• <code>/check</code> — Force immediate check"
+            )
+            try:
+                await query.edit_message_text(
+                    help_text,
+                    reply_markup=InlineKeyboardMarkup(back_button),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+            return
