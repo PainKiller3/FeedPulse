@@ -2,7 +2,7 @@ import html
 import logging
 from typing import Optional, List, Set, Tuple
 import aiohttp
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 from database.db import Database
@@ -72,6 +72,23 @@ class TelegramBotService:
             bot_info.username,
             bot_info.id,
         )
+
+        # Automatically register command autocompletion menu with Telegram
+        commands = [
+            BotCommand("add", "Subscribe to an RSS/torrent feed"),
+            BotCommand("list", "View all active subscriptions"),
+            BotCommand("remove", "Unsubscribe from a feed"),
+            BotCommand("filter", "Configure keyword filters"),
+            BotCommand("check", "Force an immediate feed check"),
+            BotCommand("test", "Preview sample torrent notification"),
+            BotCommand("id", "Show Chat ID, Topic ID, and User ID"),
+            BotCommand("help", "Show help and usage guide"),
+        ]
+        try:
+            await self.application.bot.set_my_commands(commands)
+            logger.info("Bot commands successfully registered with Telegram Menu")
+        except Exception as e:
+            logger.warning("Could not register bot commands in Telegram: %s", e)
 
     async def stop(self) -> None:
         """Gracefully stop the Telegram bot."""
