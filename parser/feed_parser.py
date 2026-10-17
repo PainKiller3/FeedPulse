@@ -378,43 +378,96 @@ class FeedParser:
             return None, None, None, [], 0
 
     @staticmethod
-    def _check_match(text: str, pattern: str) -> bool:
-        """Check if pattern matches text via regex or case-insensitive substring."""
+    def _check_match(text: str, pattern: str, case_sensitive: bool = False) -> bool:
+        """Check if pattern matches text via regex or substring."""
         pattern = pattern.strip()
         if not pattern:
             return False
+        flags = 0 if case_sensitive else re.IGNORECASE
         try:
-            if re.search(pattern, text, re.IGNORECASE):
+            if re.search(pattern, text, flags):
                 return True
         except re.error:
             pass
+        if case_sensitive:
+            return pattern in text
         return pattern.lower() in text.lower()
+
+    @staticmethod
+    def _parse_filter_groups(filter_str: str) -> List[List[str]]:
+        """
+        Parse a filter string into conjunction groups (AND) of alternatives (OR).
+        Syntax:
+          "group1 | group2 | group3" -> all groups must match (AND)
+          "term1 or term2, term3"    -> at least one alternative in the group must match (OR)
+        Example:
+          "1080p or 720p | PSA | hevc or x265"
+          -> [["1080p", "720p"], ["PSA"], ["hevc", "x265"]]
+        """
+        if not filter_str or not filter_str.strip():
+            return []
+
+        # Split on pipe '|' to get AND groups
+        raw_groups = filter_str.split("|")
+        conjunction_groups = []
+
+        for grp in raw_groups:
+            grp = grp.strip()
+            if not grp:
+                continue
+
+            # Split within group on ' or ', ' OR ', or ',' for alternatives
+            alternatives = re.split(r",|\s+(?:or|OR)\s+", grp)
+            cleaned_alts = [a.strip() for a in alternatives if a.strip()]
+            if cleaned_alts:
+                conjunction_groups.append(cleaned_alts)
+
+        return conjunction_groups
 
     @staticmethod
     def matches_filters(
         title: str,
         filter_keywords: Optional[str] = None,
         filter_exclude: Optional[str] = None,
+        case_sensitive: bool = False,
     ) -> bool:
         """
         Check if an item title passes inclusion and exclusion keyword filters.
-        filter_keywords: comma or pipe separated keywords, at least one MUST match (case-insensitive or regex)
-        filter_exclude: comma or pipe separated keywords, NONE must match (case-insensitive or regex)
+        Supports advanced boolean grouping:
+          - '|' acts as AND (every pipe-separated group must be satisfied)
+          - 'or' and ',' act as OR (any alternative within a group satisfies that group)
+          - For exclude filters: any matching term or compound term ('word1 + word2') excludes the item.
         """
-        # Check required keywords (ANY of the comma/pipe-separated keywords or regex must match)
-        if filter_keywords:
-            raw_patterns = re.split(r"[,|]", filter_keywords)
-            keywords = [p.strip() for p in raw_patterns if p.strip()]
-            if keywords and not any(
-                FeedParser._check_match(title, kw) for kw in keywords
-            ):
-                return False
+        if not title:
+            return False
 
-        # Check excluded keywords (NONE of the keywords may match)
-        if filter_exclude:
-            raw_patterns = re.split(r"[,|]", filter_exclude)
-            excludes = [p.strip() for p in raw_patterns if p.strip()]
-            if any(FeedParser._check_match(title, ex) for ex in excludes):
-                return False
+        # 1. Check required inclusion groups: EVERY group must have at least one match
+        if filter_keywords and filter_keywords.strip():
+            groups = FeedParser._parse_filter_groups(filter_keywords)
+            for grp in groups:
+                if not any(
+                    FeedParser._check_match(title, kw, case_sensitive) for kw in grp
+                ):
+                    return False
+
+        # 2. Check exclusion filters: NO exclusion rule should match
+        if filter_exclude and filter_exclude.strip():
+            raw_excludes = re.split(r"[,|]|\s+(?:or|OR)\s+", filter_exclude)
+            for ex in raw_excludes:
+                ex = ex.strip()
+                if not ex:
+                    continue
+                # Support compound exclusion e.g. "hindi + dubbed" or "hindi & dubbed"
+                if " + " in ex or " & " in ex:
+                    sub_parts = re.split(r"\s+[+&]\s+", ex)
+                    if all(
+                        FeedParser._check_match(title, sp, case_sensitive)
+                        for sp in sub_parts
+                        if sp.strip()
+                    ):
+                        return False
+                else:
+                    if FeedParser._check_match(title, ex, case_sensitive):
+                        return False
 
         return True

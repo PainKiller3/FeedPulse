@@ -154,6 +154,7 @@ class Database:
         thread_id: Optional[int] = None,
         user_id: Optional[int] = None,
         custom_title: Optional[str] = None,
+        case_sensitive: bool = False,
     ) -> Tuple[int, str, bool]:
         """
         Subscribe a target (chat, channel, topic, and user) to a feed.
@@ -181,6 +182,8 @@ class Database:
                 update_fields["filter_exclude"] = filter_exclude
             if custom_title is not None:
                 update_fields["custom_title"] = custom_title
+            if case_sensitive is not None:
+                update_fields["case_sensitive"] = case_sensitive
             if update_fields:
                 await self.db.subscriptions.update_one(
                     {"_id": existing["_id"]}, {"$set": update_fields}
@@ -194,6 +197,7 @@ class Database:
             "thread_id": thread_id,
             "user_id": user_id,
             "custom_title": custom_title,
+            "case_sensitive": case_sensitive,
             "filter_keywords": filter_keywords,
             "filter_exclude": filter_exclude,
             "created_at": datetime.now(timezone.utc),
@@ -500,6 +504,7 @@ class Database:
         filter_keywords: Optional[str] = None,
         filter_exclude: Optional[str] = None,
         new_url: Optional[str] = None,
+        case_sensitive: Optional[bool] = None,
         thread_id: Optional[int] = None,
         user_id: Optional[int] = None,
         is_admin: bool = False,
@@ -597,6 +602,14 @@ class Database:
                 update_fields["filter_exclude"] = clean_exc
                 changed_summary["filter_exclude"] = clean_exc
 
+        if case_sensitive is not None:
+            update_fields["case_sensitive"] = case_sensitive
+            changed_summary["case_sensitive"] = (
+                "Enabled (strict casing)"
+                if case_sensitive
+                else "Disabled (case-insensitive)"
+            )
+
         if (
             new_url is not None
             and new_url.strip()
@@ -675,6 +688,7 @@ class Database:
                     "thread_id": "$thread_id",
                     "user_id": "$user_id",
                     "is_paused": "$is_paused",
+                    "case_sensitive": "$case_sensitive",
                     "created_at": "$created_at",
                 }
             },
@@ -712,6 +726,7 @@ class Database:
                     "filter_exclude": "$filter_exclude",
                     "last_checked": "$feed_info.last_checked",
                     "is_paused": "$is_paused",
+                    "case_sensitive": "$case_sensitive",
                     "created_at": "$created_at",
                 }
             },

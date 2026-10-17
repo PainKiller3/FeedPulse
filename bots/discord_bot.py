@@ -99,12 +99,14 @@ class DiscordBotService:
             url="The RSS or Atom feed URL (e.g. https://example.com/rss/feed.xml)",
             filter_include="Optional comma-separated keywords that MUST appear in the title",
             filter_exclude="Optional comma-separated keywords to ignore",
+            case_sensitive="Strict case sensitivity for keyword filters (default False)",
         )
         async def slash_add(
             interaction: discord.Interaction,
             url: str,
             filter_include: Optional[str] = None,
             filter_exclude: Optional[str] = None,
+            case_sensitive: bool = False,
         ):
             await interaction.response.defer(thinking=True)
             url = url.strip()
@@ -141,6 +143,7 @@ class DiscordBotService:
                     title=feed_title,
                     filter_keywords=filter_include,
                     filter_exclude=filter_exclude,
+                    case_sensitive=case_sensitive,
                 )
 
                 self.poller.trigger_immediate_check()
@@ -165,6 +168,10 @@ class DiscordBotService:
                 if filter_exclude:
                     embed.add_field(
                         name="🚫 Excluded Keywords", value=filter_exclude, inline=True
+                    )
+                if case_sensitive:
+                    embed.add_field(
+                        name="🔤 Case-Sensitive", value="Enabled", inline=True
                     )
 
                 embed.set_footer(
@@ -205,6 +212,8 @@ class DiscordBotService:
                     val += f"\n🔍 *Include:* `{s['filter_keywords']}`"
                 if s.get("filter_exclude"):
                     val += f"\n🚫 *Exclude:* `{s['filter_exclude']}`"
+                if s.get("case_sensitive"):
+                    val += "\n🔤 *Case-Sensitive:* `Enabled`"
 
                 paused_tag = " ⏸️ [PAUSED]" if s.get("is_paused") else ""
                 embed.add_field(
@@ -312,6 +321,7 @@ class DiscordBotService:
             filter_include="Optional keywords that MUST be in the title (or 'none' to clear)",
             filter_exclude="Optional keywords to ignore (or 'none' to clear)",
             new_url="Optional new feed RSS/Atom URL",
+            case_sensitive="Toggle case sensitivity for filters (True/False)",
         )
         async def slash_edit(
             interaction: discord.Interaction,
@@ -320,13 +330,21 @@ class DiscordBotService:
             filter_include: Optional[str] = None,
             filter_exclude: Optional[str] = None,
             new_url: Optional[str] = None,
+            case_sensitive: Optional[bool] = None,
         ):
             channel_id = str(interaction.channel_id)
             if not any(
-                x is not None for x in (title, filter_include, filter_exclude, new_url)
+                x is not None
+                for x in (
+                    title,
+                    filter_include,
+                    filter_exclude,
+                    new_url,
+                    case_sensitive,
+                )
             ):
                 await interaction.response.send_message(
-                    "⚠️ Please specify at least one option to edit: `title`, `filter_include`, `filter_exclude`, or `new_url`."
+                    "⚠️ Please specify at least one option to edit: `title`, `filter_include`, `filter_exclude`, `new_url`, or `case_sensitive`."
                 )
                 return
 
@@ -338,6 +356,7 @@ class DiscordBotService:
                 filter_keywords=filter_include,
                 filter_exclude=filter_exclude,
                 new_url=new_url,
+                case_sensitive=case_sensitive,
             )
 
             if status == "success":
@@ -412,10 +431,82 @@ class DiscordBotService:
             )
 
         @self.bot.command(name="add")
-        async def prefix_add(ctx: commands.Context, url: str = None):
-            if not url:
-                await ctx.send("⚠️ Usage: `!add <feed_url>`")
+        async def prefix_add(ctx: commands.Context, *args):
+            if not args:
+                await ctx.send(
+                    "⚠️ Usage: `!add <feed_url> [-inf <include>] [-exf <exclude>] [-stv]`"
+                )
                 return
+
+            url = None
+            inf = None
+            exf = None
+            case_sensitive = False
+
+            rem = list(args)
+            for idx, a in enumerate(rem):
+                if a.startswith("http://") or a.startswith("https://"):
+                    url = a
+                    rem = rem[:idx] + rem[idx + 1 :]
+                    break
+
+            if not url:
+                await ctx.send("❌ Please provide a valid HTTP/HTTPS URL.")
+                return
+
+            i = 0
+            while i < len(rem):
+                tok = rem[i].lower()
+                if tok in ("-inf", "--inf", "-inc", "--inc"):
+                    i += 1
+                    col = []
+                    while i < len(rem) and not rem[i].startswith("-"):
+                        col.append(rem[i])
+                        i += 1
+                    if col:
+                        inf = " ".join(col)
+                    continue
+                elif tok.startswith(("inc=", "inf=")):
+                    inf = rem[i].split("=", 1)[1]
+                    i += 1
+                    continue
+                elif tok in ("-exf", "--exf", "-exc", "--exc"):
+                    i += 1
+                    col = []
+                    while i < len(rem) and not rem[i].startswith("-"):
+                        col.append(rem[i])
+                        i += 1
+                    if col:
+                        exf = " ".join(col)
+                    continue
+                elif tok.startswith(("exc=", "exf=")):
+                    exf = rem[i].split("=", 1)[1]
+                    i += 1
+                    continue
+                elif tok in ("-stv", "--stv", "-cs", "--cs"):
+                    i += 1
+                    if i < len(rem) and rem[i].lower() in (
+                        "true",
+                        "1",
+                        "yes",
+                        "false",
+                        "0",
+                        "no",
+                    ):
+                        case_sensitive = rem[i].lower() in ("true", "1", "yes")
+                        i += 1
+                    else:
+                        case_sensitive = True
+                    continue
+                elif tok.startswith(("stv=", "cs=")):
+                    case_sensitive = rem[i].split("=", 1)[1].lower() in (
+                        "true",
+                        "1",
+                        "yes",
+                    )
+                    i += 1
+                    continue
+                i += 1
 
             try:
                 async with aiohttp.ClientSession() as session:
@@ -439,12 +530,20 @@ class DiscordBotService:
                     target_id=channel_id,
                     url=url,
                     title=title or url,
+                    filter_keywords=inf,
+                    filter_exclude=exf,
+                    case_sensitive=case_sensitive,
                 )
                 self.poller.trigger_immediate_check()
                 status_str = "Subscribed" if is_new else "Already subscribed to"
-                await ctx.send(
-                    f"✅ **{status_str}** `{effective_title}` (ID: {feed_id})! Found {len(items)} items."
-                )
+                msg = f"✅ **{status_str}** `{effective_title}` (ID: {feed_id})! Found {len(items)} items."
+                if inf:
+                    msg += f"\n🔍 Required: `{inf}`"
+                if exf:
+                    msg += f"\n🚫 Excluded: `{exf}`"
+                if case_sensitive:
+                    msg += "\n🔤 Case-Sensitive: `Enabled`"
+                await ctx.send(msg)
             except Exception as e:
                 await ctx.send(f"❌ Error: {e}")
 
@@ -458,7 +557,8 @@ class DiscordBotService:
             msg = f"📋 **Feeds in #{ctx.channel}:**\n"
             for s in subs:
                 paused_tag = " ⏸️ [PAUSED]" if s.get("is_paused") else ""
-                msg += f"• **[{s['feed_id']}]** {s['title']}{paused_tag} - `<{s['url']}>\n`"
+                cs_tag = " [Case-Sensitive]" if s.get("case_sensitive") else ""
+                msg += f"• **[{s['feed_id']}]** {s['title']}{paused_tag}{cs_tag} - `<{s['url']}>\n`"
             msg += "\n*Manage:* `!pause <id>` | `!resume <id>` | `!edit <id>` | `!remove <id>`"
             await ctx.send(msg)
 
@@ -528,7 +628,7 @@ class DiscordBotService:
         ):
             if not feed_id or not args:
                 await ctx.send(
-                    "⚠️ Usage: `!edit <feed_id> [-title <name>] [-inf <include>] [-exf <exclude>] [-url <new_url>]`"
+                    "⚠️ Usage: `!edit <feed_id> [-title <name>] [-inf <include>] [-exf <exclude>] [-url <new_url>] [-stv]`"
                 )
                 return
 
@@ -537,6 +637,7 @@ class DiscordBotService:
             inf = None
             exf = None
             new_url = None
+            case_sensitive = None
 
             rem = list(args)
             i = 0
@@ -591,11 +692,36 @@ class DiscordBotService:
                     new_url = rem[i].split("=", 1)[1]
                     i += 1
                     continue
+                elif tok in ("-stv", "--stv", "-cs", "--cs"):
+                    i += 1
+                    if i < len(rem) and rem[i].lower() in (
+                        "true",
+                        "1",
+                        "yes",
+                        "false",
+                        "0",
+                        "no",
+                    ):
+                        case_sensitive = rem[i].lower() in ("true", "1", "yes")
+                        i += 1
+                    else:
+                        case_sensitive = True
+                    continue
+                elif tok.startswith(("stv=", "cs=")):
+                    case_sensitive = rem[i].split("=", 1)[1].lower() in (
+                        "true",
+                        "1",
+                        "yes",
+                    )
+                    i += 1
+                    continue
                 i += 1
 
-            if not any(x is not None for x in (title, inf, exf, new_url)):
+            if not any(
+                x is not None for x in (title, inf, exf, new_url, case_sensitive)
+            ):
                 await ctx.send(
-                    "⚠️ Please specify at least one option to edit: `-title`, `-inf`, `-exf`, or `-url`."
+                    "⚠️ Please specify at least one option to edit: `-title`, `-inf`, `-exf`, `-url`, or `-stv`."
                 )
                 return
 
@@ -607,6 +733,7 @@ class DiscordBotService:
                 filter_keywords=inf,
                 filter_exclude=exf,
                 new_url=new_url,
+                case_sensitive=case_sensitive,
             )
 
             if status == "success":

@@ -235,8 +235,12 @@ class FeedPoller:
             filter_exclude = sub.get("filter_exclude")
 
             # Check keyword filtering
+            case_sensitive = sub.get("case_sensitive", False)
             if not FeedParser.matches_filters(
-                item.title, filter_keywords, filter_exclude
+                item.title,
+                filter_keywords,
+                filter_exclude,
+                case_sensitive=case_sensitive,
             ):
                 logger.debug(
                     "Item '%s' filtered out for subscriber %s:%s (inc=%s, exc=%s)",

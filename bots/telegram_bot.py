@@ -290,6 +290,10 @@ class TelegramBotService:
             "  /add PSA https://www.limetorrents.fun/rss/ -inf PSA\n"
             "• Subscribe a channel with include & exclude filters:\n"
             "  /add https://example.com/rss/ -inf 1080p,flac -exf 720p,cam @MyChannel\n"
+            "• Advanced boolean filter (1080p OR 720p) AND PSA AND x265:\n"
+            "  /add https://example.com/rss/ -inf 1080p or 720p | PSA | x265\n"
+            "• Case-sensitive filter:\n"
+            "  /add https://example.com/rss/ -inf PSA -stv true\n"
             "• Pause or resume notifications:\n"
             "  /pause 1 or /pause all\n"
             "  /resume 1 or /resume all\n"
@@ -361,6 +365,7 @@ class TelegramBotService:
         thread_arg = None
         inc_filter = None
         exc_filter = None
+        case_sensitive = False
 
         rem = args[url_idx + 1 :]
         i = 0
@@ -434,6 +439,27 @@ class TelegramBotService:
                 i += 1
                 continue
 
+            elif lower in ("-stv", "--stv", "-cs", "--cs"):
+                i += 1
+                if i < len(rem) and rem[i].lower() in (
+                    "true",
+                    "1",
+                    "yes",
+                    "false",
+                    "0",
+                    "no",
+                ):
+                    case_sensitive = rem[i].lower() in ("true", "1", "yes")
+                    i += 1
+                else:
+                    case_sensitive = True
+                continue
+
+            elif lower.startswith(("stv=", "cs=", "sensitive=")):
+                case_sensitive = lower.split("=", 1)[1] in ("true", "1", "yes")
+                i += 1
+                continue
+
             elif token.startswith("@") or (
                 token.startswith("-100") and token[1:].isdigit()
             ):
@@ -464,7 +490,15 @@ class TelegramBotService:
 
             i += 1
 
-        return url, custom_title, target_arg, thread_arg, inc_filter, exc_filter
+        return (
+            url,
+            custom_title,
+            target_arg,
+            thread_arg,
+            inc_filter,
+            exc_filter,
+            case_sensitive,
+        )
 
     async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Subscribe a chat, channel, or topic to an RSS feed."""
@@ -475,9 +509,15 @@ class TelegramBotService:
         user_id = user.id if user else 0
         user_name = user.full_name or user.first_name if user else f"User {user_id}"
 
-        url, custom_title, target_arg, thread_arg, inc_filter, exc_filter = (
-            self._parse_add_args(context.args or [])
-        )
+        (
+            url,
+            custom_title,
+            target_arg,
+            thread_arg,
+            inc_filter,
+            exc_filter,
+            case_sensitive,
+        ) = self._parse_add_args(context.args or [])
         if not url:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
@@ -535,6 +575,7 @@ class TelegramBotService:
                 filter_exclude=exc_filter,
                 user_id=user_id,
                 custom_title=custom_title,
+                case_sensitive=case_sensitive,
             )
 
             # Signal poller to register and track
@@ -555,6 +596,8 @@ class TelegramBotService:
                 filter_lines.append(
                     f"🚫 <b>Exclude:</b> <code>{html.escape(exc_filter)}</code>"
                 )
+            if case_sensitive:
+                filter_lines.append("🔤 <b>Case-Sensitive:</b> <code>Enabled</code>")
             filters_str = ("\n" + "\n".join(filter_lines)) if filter_lines else ""
 
             if is_new:
@@ -638,6 +681,8 @@ class TelegramBotService:
                 )
             if s.get("filter_exclude"):
                 lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
+            if s.get("case_sensitive"):
+                lines.append("  🔤 <i>Case-Sensitive: Enabled</i>")
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
         lines.append(
@@ -739,6 +784,8 @@ class TelegramBotService:
                 )
             if s.get("filter_exclude"):
                 lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
+            if s.get("case_sensitive"):
+                lines.append("  🔤 <i>Case-Sensitive: Enabled</i>")
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
         lines.append(
@@ -1070,6 +1117,7 @@ class TelegramBotService:
         inc_filter: Optional[str] = None
         exc_filter: Optional[str] = None
         new_url: Optional[str] = None
+        case_sensitive: Optional[bool] = None
         target_arg: Optional[str] = None
         thread_arg: Optional[str] = None
 
@@ -1194,6 +1242,27 @@ class TelegramBotService:
                 i += 1
                 continue
 
+            elif lower in ("-stv", "--stv", "-cs", "--cs"):
+                i += 1
+                if i < len(rem) and rem[i].lower() in (
+                    "true",
+                    "1",
+                    "yes",
+                    "false",
+                    "0",
+                    "no",
+                ):
+                    case_sensitive = rem[i].lower() in ("true", "1", "yes")
+                    i += 1
+                else:
+                    case_sensitive = True
+                continue
+
+            elif lower.startswith(("stv=", "cs=", "sensitive=")):
+                case_sensitive = lower.split("=", 1)[1] in ("true", "1", "yes")
+                i += 1
+                continue
+
             elif token.startswith("@") or (
                 token.startswith("-100") and token[1:].isdigit()
             ):
@@ -1230,6 +1299,7 @@ class TelegramBotService:
             inc_filter,
             exc_filter,
             new_url,
+            case_sensitive,
             target_arg,
             thread_arg,
         )
@@ -1242,6 +1312,7 @@ class TelegramBotService:
         • /edit <feed_id> -title "New Title"
         • /edit <feed_id> -inf 1080p,flac -exf cam,hindi
         • /edit <feed_id> -url https://new-feed-url.com/rss
+        • /edit <feed_id> -stv true
         • /edit <feed_id> -inf none (clear filter)
         """
         if not await self.check_authorization(update, context):
@@ -1253,10 +1324,12 @@ class TelegramBotService:
                 "• /edit &lt;feed_id&gt; -title &lt;new_name&gt;\n"
                 "• /edit &lt;feed_id&gt; -inf &lt;include_words&gt; [-exf &lt;exclude_words&gt;]\n"
                 "• /edit &lt;feed_id&gt; -url &lt;new_rss_url&gt;\n"
+                "• /edit &lt;feed_id&gt; -stv &lt;true/false&gt;\n"
                 "• /edit &lt;feed_id&gt; [flags] [@channel_or_chat_id]\n\n"
                 "<b>Examples:</b>\n"
                 "• Change title: <code>/edit 1 -title PSA Movies</code>\n"
                 "• Update filters: <code>/edit 1 -inf 1080p,flac -exf 720p,cam</code>\n"
+                "• Toggle case: <code>/edit 1 -stv true</code>\n"
                 "• Clear a filter: <code>/edit 1 -exf none</code>\n"
                 "• Reset custom title: <code>/edit 1 -title none</code>"
             )
@@ -1272,18 +1345,23 @@ class TelegramBotService:
             inc_filter,
             exc_filter,
             new_url,
+            case_sensitive,
             target_arg,
             thread_arg,
         ) = self._parse_edit_args(context.args)
 
-        if not any(x is not None for x in (new_title, inc_filter, exc_filter, new_url)):
+        if not any(
+            x is not None
+            for x in (new_title, inc_filter, exc_filter, new_url, case_sensitive)
+        ):
             await update.effective_message.reply_html(
                 "⚠️ <b>No changes specified!</b>\n\n"
                 "Please specify at least one setting to edit using:\n"
                 "• <code>-title &lt;name&gt;</code>\n"
                 "• <code>-inf &lt;include keywords&gt;</code>\n"
                 "• <code>-exf &lt;exclude keywords&gt;</code>\n"
-                "• <code>-url &lt;new url&gt;</code>"
+                "• <code>-url &lt;new url&gt;</code>\n"
+                "• <code>-stv &lt;true/false&gt;</code>"
             )
             return
 
@@ -1305,6 +1383,7 @@ class TelegramBotService:
             filter_keywords=inc_filter,
             filter_exclude=exc_filter,
             new_url=new_url,
+            case_sensitive=case_sensitive,
             thread_id=thread_id,
             user_id=user_id,
             is_admin=is_admin,
@@ -1330,6 +1409,10 @@ class TelegramBotService:
             if "url" in changed:
                 lines.append(
                     f"• 🔗 <b>Feed URL:</b> <code>{html.escape(changed['url'])}</code>"
+                )
+            if "case_sensitive" in changed:
+                lines.append(
+                    f"• 🔤 <b>Case-Sensitive:</b> {html.escape(changed['case_sensitive'])}"
                 )
 
             await update.effective_message.reply_html(

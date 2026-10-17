@@ -110,25 +110,35 @@ python main.py
 
 ---
 
-## 🔍 Keyword Filtering Examples
+## 🔍 Keyword Filtering & Advanced Boolean Logic
 
-You can fine-tune what torrents trigger alerts:
+You can fine-tune what torrents and posts trigger alerts using rich boolean logic, compound exclusions, and case sensitivity:
 
-- **Only alert on specific quality / formats:**
+- **Simple Inclusion / Exclusion:**
   ```text
   /filter 1 inc=1080p,flac,2160p
-  ```
-- **Block unwanted releases:**
-  ```text
   /filter 1 exc=cam,telesync,hindi,sample
-  ```
-- **Combine both:**
-  ```text
   /filter 1 inc=remux,bluray exc=cam,ts
-  ```
-- **Clear filters:**
-  ```text
   /filter 1 clear
+  ```
+
+- **Advanced Boolean Grouping (`|` for AND, `or` / `,` for OR):**
+  Matches items that have **(1080p OR 720p) AND (PSA) AND (hevc OR x265)**:
+  ```text
+  /add https://example.com/rss/ -inf 1080p or 720p | PSA | hevc or x265
+  ```
+
+- **Compound Exclusion (`+` or `&`):**
+  Only excludes the item if **both** words are present (e.g. drops items containing both `hindi` AND `dubbed`, while keeping English releases that just say `dubbed`):
+  ```text
+  /add https://example.com/rss/ -exf hindi + dubbed, cam, ts
+  ```
+
+- **Case-Sensitive Filtering (`-stv true` / `-cs true`):**
+  Enforces strict casing (e.g. only matches uppercase `PSA` and not `psa` or `pSA`):
+  ```text
+  /add https://example.com/rss/ -inf PSA -stv true
+  /edit 1 -stv false
   ```
 
 ---
