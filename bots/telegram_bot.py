@@ -437,7 +437,7 @@ class TelegramBotService:
             )
             return
 
-        lines = [f"📋 <b>Your Global Subscriptions ({len(subs)}):</b>\n"]
+        lines = [f"📋 <b>Your Active Subscriptions ({len(subs)}):</b>\n"]
         for s in subs:
             title = html.escape(s.get("title") or "Untitled Feed")
             url = html.escape(s.get("url", ""))
@@ -446,12 +446,25 @@ class TelegramBotService:
             tid = s.get("thread_id")
             checked = s.get("last_checked") or "Not yet checked"
 
-            dest_info = f"<code>{tgt}</code>"
+            dest_label = f"<code>{tgt}</code>"
+            try:
+                tgt_chat = await context.bot.get_chat(
+                    int(tgt) if tgt.lstrip("-").isdigit() else tgt
+                )
+                if tgt_chat and tgt_chat.title:
+                    dest_label = (
+                        f"<b>{html.escape(tgt_chat.title)}</b> (<code>{tgt}</code>)"
+                    )
+                elif tgt_chat and tgt_chat.username:
+                    dest_label = f"@{tgt_chat.username} (<code>{tgt}</code>)"
+            except Exception:
+                pass
+
             if tid:
-                dest_info += f" [Topic: <code>#{tid}</code>]"
+                dest_label += f" [Topic: <code>#{tid}</code>]"
 
             lines.append(f"• <b>[{fid}] {title}</b>")
-            lines.append(f"  🎯 Destination: {dest_info}")
+            lines.append(f"  🎯 Destination: {dest_label}")
             lines.append(f"  🔗 <code>{url}</code>")
             if s.get("filter_keywords"):
                 lines.append(
@@ -475,6 +488,7 @@ class TelegramBotService:
 
         user = update.effective_user
         user_id = user.id if user else 0
+        chat = update.effective_chat
         is_admin = await self.is_admin_or_super(update)
 
         raw_args = list(context.args or [])
@@ -488,6 +502,12 @@ class TelegramBotService:
             a for a in raw_args if a.lower() not in ("all", "-all", "--all")
         ]
         target_arg = filtered_args[0] if filtered_args else None
+
+        # UX Enhancement: If in private DM and no target argument was specified,
+        # seamlessly display all feeds owned by this user across their channels/groups/DMs!
+        if chat and chat.type == "private" and not target_arg and not show_all:
+            await self.cmd_myfeeds(update, context)
+            return
 
         target_id, thread_id, target_title = await self._resolve_destination(
             update, context, target_arg

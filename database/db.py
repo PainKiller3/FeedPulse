@@ -233,13 +233,22 @@ class Database:
         if thread_id is not None:
             base_query["thread_id"] = thread_id
 
+        is_private = (user_id is not None) and (str(target_id) == str(user_id))
+
         # Find all subscriptions matching this feed in this target
         existing_subs = await self.db.subscriptions.find(base_query).to_list(length=100)
         if not existing_subs:
-            return None, "not_found"
+            # If in private DM and no sub found directly in DM, check if user owns this feed in another chat
+            if is_private and user_id is not None:
+                user_subs = await self.db.subscriptions.find(
+                    {"feed_id": feed_id, "platform": platform, "user_id": user_id}
+                ).to_list(length=10)
+                if user_subs:
+                    existing_subs = user_subs
+            if not existing_subs:
+                return None, "not_found"
 
         # Check ownership unless caller has admin/owner privileges or is in private chat
-        is_private = (user_id is not None) and (str(target_id) == str(user_id))
         if not is_admin and not is_private and user_id is not None:
             user_sub = next(
                 (s for s in existing_subs if s.get("user_id") == user_id), None
@@ -312,11 +321,18 @@ class Database:
         if thread_id is not None:
             base_query["thread_id"] = thread_id
 
+        is_private = (user_id is not None) and (str(target_id) == str(user_id))
         existing_subs = await self.db.subscriptions.find(base_query).to_list(length=100)
         if not existing_subs:
-            return "not_found"
-
-        is_private = (user_id is not None) and (str(target_id) == str(user_id))
+            # If in private DM and no sub found directly in DM, check if user owns this feed in another chat
+            if is_private and user_id is not None:
+                user_subs = await self.db.subscriptions.find(
+                    {"feed_id": feed_id, "platform": platform, "user_id": user_id}
+                ).to_list(length=10)
+                if user_subs:
+                    existing_subs = user_subs
+            if not existing_subs:
+                return "not_found"
         if not is_admin and not is_private and user_id is not None:
             user_sub = next(
                 (s for s in existing_subs if s.get("user_id") == user_id), None
