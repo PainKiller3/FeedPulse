@@ -266,25 +266,23 @@ class TelegramBotService:
             "Real-time RSS & BitTorrent notifications with file sizes, seeds, "
             "direct <code>.torrent</code> downloads, and 1-click Magnet links!\n\n"
             "<b>Available Commands:</b>\n"
-            "➕ /add &lt;url&gt; [chat/channel] [topic_id] — Subscribe to a feed\n"
+            "➕ /add [title] &lt;url&gt; [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [chat/channel] [topic_id]\n"
             "📋 /list [all] [chat/channel] — View your subscribed feeds (or all feeds if admin)\n"
             "👤 /myfeeds — View all your subscriptions across all chats\n"
             "➖ /remove &lt;id&gt; [chat/channel] — Unsubscribe from a feed\n"
-            "🔍 /filter &lt;id&gt; inc=&lt;words&gt; exc=&lt;words&gt; — Keyword filters\n"
+            "🔍 /filter &lt;id&gt; -inf &lt;words&gt; -exf &lt;words&gt; — Keyword filters\n"
             "🔄 /check — Force an immediate feed check\n"
             "🧪 /test [chat/channel] — Preview sample torrent notification\n"
             "🆔 /id — Display Chat ID, Topic ID, and your User ID\n\n"
             "<b>Examples:</b>\n"
-            "• Subscribe current chat / topic:\n"
-            "  /add https://example.com/rss/feed.xml\n"
-            "• Subscribe a channel from DM:\n"
-            "  /add https://example.com/rss/feed.xml @MyChannel\n"
-            "• Subscribe a forum topic from DM:\n"
-            "  /add https://example.com/rss/feed.xml -1001234567890 42\n"
+            "• Subscribe with custom title & include filter:\n"
+            "  /add PSA https://www.limetorrents.fun/rss/ -inf PSA\n"
+            "• Subscribe a channel with include & exclude filters:\n"
+            "  /add https://example.com/rss/ -inf 1080p,flac -exf 720p,cam @MyChannel\n"
+            "• Update filters for feed #1:\n"
+            "  /filter 1 -inf PSA,1080p -exf 720p\n"
             "• List your feeds in current chat:\n"
             "  /list\n"
-            "• List all feeds in current chat (Admins only):\n"
-            "  /list all\n"
             "• List all your feeds across all chats:\n"
             "  /myfeeds"
         )
@@ -310,6 +308,148 @@ class TelegramBotService:
 
         await update.effective_message.reply_html("\n".join(lines))
 
+    @staticmethod
+    def _parse_add_args(
+        args: List[str],
+    ) -> Tuple[
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+        Optional[str],
+    ]:
+        """
+        Parse flexible feed arguments supporting custom titles and -inf/-exf flags:
+        /add PSA https://example.com/rss/ -inf PSA -exf 720p @channel
+        Returns (url, custom_title, target_arg, thread_arg, inc_filter, exc_filter).
+        """
+        if not args:
+            return None, None, None, None, None, None
+
+        url = None
+        url_idx = -1
+        for idx, arg in enumerate(args):
+            clean_arg = arg.strip()
+            if clean_arg.startswith("http://") or clean_arg.startswith("https://"):
+                url = clean_arg
+                url_idx = idx
+                break
+
+        if not url or url_idx == -1:
+            return None, None, None, None, None, None
+
+        custom_title = " ".join(args[:url_idx]).strip() or None
+
+        target_arg = None
+        thread_arg = None
+        inc_filter = None
+        exc_filter = None
+
+        rem = args[url_idx + 1 :]
+        i = 0
+        while i < len(rem):
+            token = rem[i].strip()
+            lower = token.lower()
+
+            if lower in (
+                "-inf",
+                "--inf",
+                "-inc",
+                "--inc",
+                "-include",
+                "--include",
+            ):
+                i += 1
+                collected = []
+                while i < len(rem) and not rem[i].startswith(
+                    (
+                        "-exf",
+                        "--exf",
+                        "-exc",
+                        "--exc",
+                        "-exclude",
+                        "--exclude",
+                        "@",
+                        "-100",
+                    )
+                ):
+                    collected.append(rem[i].strip())
+                    i += 1
+                if collected:
+                    inc_filter = " ".join(collected)
+                continue
+
+            elif lower.startswith(("inc=", "inf=", "-inf=", "-inc=")):
+                inc_filter = token.split("=", 1)[1].strip()
+                i += 1
+                continue
+
+            elif lower in (
+                "-exf",
+                "--exf",
+                "-exc",
+                "--exc",
+                "-exclude",
+                "--exclude",
+            ):
+                i += 1
+                collected = []
+                while i < len(rem) and not rem[i].startswith(
+                    (
+                        "-inf",
+                        "--inf",
+                        "-inc",
+                        "--inc",
+                        "-include",
+                        "--include",
+                        "@",
+                        "-100",
+                    )
+                ):
+                    collected.append(rem[i].strip())
+                    i += 1
+                if collected:
+                    exc_filter = " ".join(collected)
+                continue
+
+            elif lower.startswith(("exc=", "exf=", "-exf=", "-exc=")):
+                exc_filter = token.split("=", 1)[1].strip()
+                i += 1
+                continue
+
+            elif token.startswith("@") or (
+                token.startswith("-100") and token[1:].isdigit()
+            ):
+                target_arg = token
+                if i + 1 < len(rem) and rem[i + 1].strip().isdigit():
+                    thread_arg = rem[i + 1].strip()
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            elif (
+                (token.startswith("-") and token[1:].isdigit())
+                or (len(token) >= 7 and token.isdigit())
+            ) and not target_arg:
+                target_arg = token
+                if i + 1 < len(rem) and rem[i + 1].strip().isdigit():
+                    thread_arg = rem[i + 1].strip()
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            elif token.isdigit() and target_arg and not thread_arg:
+                thread_arg = token
+                i += 1
+                continue
+
+            i += 1
+
+        return url, custom_title, target_arg, thread_arg, inc_filter, exc_filter
+
     async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Subscribe a chat, channel, or topic to an RSS feed."""
         if not await self.check_authorization(update, context):
@@ -319,13 +459,18 @@ class TelegramBotService:
         user_id = user.id if user else 0
         user_name = user.full_name or user.first_name if user else f"User {user_id}"
 
-        if not context.args:
+        url, custom_title, target_arg, thread_arg, inc_filter, exc_filter = (
+            self._parse_add_args(context.args or [])
+        )
+        if not url:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
-                "• /add &lt;feed_url&gt; (current chat/topic)\n"
-                "• /add &lt;feed_url&gt; &lt;@channel_or_chat_id&gt; [topic_id]\n\n"
-                "<b>Example:</b>\n"
-                "/add https://example.com/rss/feed.xml @MyChannel"
+                "• /add [title] &lt;feed_url&gt; [-inf &lt;include&gt;] [-exf &lt;exclude&gt;] [@channel]\n\n"
+                "<b>Examples:</b>\n"
+                "• Subscribe with custom title & include filter:\n"
+                "  /add PSA https://www.limetorrents.fun/rss/ -inf PSA\n"
+                "• Subscribe a channel with filters:\n"
+                "  /add https://example.com/rss/ -inf 1080p,flac -exf 720p,cam @MyChannel"
             )
             return
 
@@ -339,16 +484,6 @@ class TelegramBotService:
                     "Please remove unused feeds with /remove before adding new ones."
                 )
                 return
-
-        url = context.args[0].strip()
-        if not (url.startswith("http://") or url.startswith("https://")):
-            await update.effective_message.reply_html(
-                "❌ Please provide a valid HTTP/HTTPS URL."
-            )
-            return
-
-        target_arg = context.args[1] if len(context.args) > 1 else None
-        thread_arg = context.args[2] if len(context.args) > 2 else None
 
         target_id, thread_id, target_title = await self._resolve_destination(
             update, context, target_arg, thread_arg
@@ -373,13 +508,15 @@ class TelegramBotService:
                 )
                 return
 
-            feed_title = title or url
+            feed_title = custom_title or title or url
             feed_id, effective_title, is_new = await self.db.subscribe(
                 platform="telegram",
                 target_id=target_id,
                 url=url,
                 title=feed_title,
                 thread_id=thread_id,
+                filter_keywords=inc_filter,
+                filter_exclude=exc_filter,
                 user_id=user_id,
             )
 
@@ -392,13 +529,24 @@ class TelegramBotService:
 
             subscriber_label = f"{html.escape(user_name)} (<code>{user_id}</code>)"
 
+            filter_lines = []
+            if inc_filter:
+                filter_lines.append(
+                    f"🔍 <b>Include:</b> <code>{html.escape(inc_filter)}</code>"
+                )
+            if exc_filter:
+                filter_lines.append(
+                    f"🚫 <b>Exclude:</b> <code>{html.escape(exc_filter)}</code>"
+                )
+            filters_str = ("\n" + "\n".join(filter_lines)) if filter_lines else ""
+
             if is_new:
                 reply_text = (
                     f"✅ <b>Successfully Subscribed!</b>\n\n"
                     f"📡 <b>Feed:</b> {html.escape(effective_title)}\n"
                     f"🆔 <b>Feed ID:</b> <code>{feed_id}</code>\n"
                     f"🎯 <b>Destination:</b> {dest_str}\n"
-                    f"👤 <b>Subscriber:</b> {subscriber_label}\n"
+                    f"👤 <b>Subscriber:</b> {subscriber_label}{filters_str}\n"
                     f"🔗 <b>URL:</b> {html.escape(url)}\n"
                     f"📦 <b>Current Items:</b> {len(items)}\n\n"
                     f"🔔 FeedPulse will notify every {POLL_INTERVAL_SECONDS}s when new uploads appear."
@@ -406,7 +554,7 @@ class TelegramBotService:
             else:
                 reply_text = (
                     f"ℹ️ <b>Already Subscribed!</b>\n\n"
-                    f"You are already monitoring <b>{html.escape(effective_title)}</b> (ID: <code>{feed_id}</code>) in {dest_str}."
+                    f"You are already monitoring <b>{html.escape(effective_title)}</b> (ID: <code>{feed_id}</code>) in {dest_str}.{filters_str}"
                 )
 
             await status_msg.edit_text(
@@ -649,9 +797,12 @@ class TelegramBotService:
         if not context.args or len(context.args) < 2:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
-                "/filter &lt;feed_id&gt; inc=&lt;words&gt; exc=&lt;words&gt; [@channel]\n\n"
-                "<b>Example:</b>\n"
-                "/filter 1 inc=1080p,flac exc=cam,hindi\n"
+                "• /filter &lt;feed_id&gt; -inf &lt;words&gt; [-exf &lt;words&gt;] [@channel]\n"
+                "• /filter &lt;feed_id&gt; inc=&lt;words&gt; [exc=&lt;words&gt;] [@channel]\n"
+                "• /filter &lt;feed_id&gt; &lt;words&gt; (simple include filter)\n\n"
+                "<b>Examples:</b>\n"
+                "• /filter 1 -inf PSA -exf 720p\n"
+                "• /filter 1 inc=1080p,flac exc=cam,hindi\n"
                 "<i>To clear filters:</i> /filter 1 clear"
             )
             return
@@ -691,11 +842,57 @@ class TelegramBotService:
             inc_val = ""
             exc_val = ""
         else:
-            for part in filter_parts:
-                if part.lower().startswith("inc="):
-                    inc_val = part[4:].strip()
-                elif part.lower().startswith("exc="):
-                    exc_val = part[4:].strip()
+            i = 0
+            while i < len(filter_parts):
+                part = filter_parts[i].strip()
+                plow = part.lower()
+                if plow in (
+                    "-inf",
+                    "--inf",
+                    "-inc",
+                    "--inc",
+                    "-include",
+                    "--include",
+                ):
+                    i += 1
+                    collected = []
+                    while i < len(filter_parts) and not filter_parts[
+                        i
+                    ].lower().startswith(
+                        ("-exf", "--exf", "-exc", "--exc", "-exclude", "--exclude")
+                    ):
+                        collected.append(filter_parts[i].strip())
+                        i += 1
+                    if collected:
+                        inc_val = " ".join(collected)
+                    continue
+                elif plow in (
+                    "-exf",
+                    "--exf",
+                    "-exc",
+                    "--exc",
+                    "-exclude",
+                    "--exclude",
+                ):
+                    i += 1
+                    collected = []
+                    while i < len(filter_parts) and not filter_parts[
+                        i
+                    ].lower().startswith(
+                        ("-inf", "--inf", "-inc", "--inc", "-include", "--include")
+                    ):
+                        collected.append(filter_parts[i].strip())
+                        i += 1
+                    if collected:
+                        exc_val = " ".join(collected)
+                    continue
+                elif plow.startswith(("inc=", "inf=", "-inf=", "-inc=")):
+                    inc_val = part.split("=", 1)[1].strip()
+                elif plow.startswith(("exc=", "exf=", "-exf=", "-exc=")):
+                    exc_val = part.split("=", 1)[1].strip()
+                elif inc_val is None and not part.startswith("-"):
+                    inc_val = part
+                i += 1
 
         status = await self.db.update_filters(
             platform="telegram",

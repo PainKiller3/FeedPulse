@@ -299,6 +299,19 @@ class FeedParser:
             return None, None, None, [], 0
 
     @staticmethod
+    def _check_match(text: str, pattern: str) -> bool:
+        """Check if pattern matches text via regex or case-insensitive substring."""
+        pattern = pattern.strip()
+        if not pattern:
+            return False
+        try:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        except re.error:
+            pass
+        return pattern.lower() in text.lower()
+
+    @staticmethod
     def matches_filters(
         title: str,
         filter_keywords: Optional[str] = None,
@@ -306,25 +319,23 @@ class FeedParser:
     ) -> bool:
         """
         Check if an item title passes inclusion and exclusion keyword filters.
-        filter_keywords: comma-separated list of keywords, at least one MUST match (case-insensitive)
-        filter_exclude: comma-separated list of keywords, NONE must match (case-insensitive)
+        filter_keywords: comma or pipe separated keywords, at least one MUST match (case-insensitive or regex)
+        filter_exclude: comma or pipe separated keywords, NONE must match (case-insensitive or regex)
         """
-        title_lower = title.lower()
-
-        # Check required keywords (ANY of the comma-separated keywords must match)
+        # Check required keywords (ANY of the comma/pipe-separated keywords or regex must match)
         if filter_keywords:
-            keywords = [
-                kw.strip().lower() for kw in filter_keywords.split(",") if kw.strip()
-            ]
-            if keywords and not any(kw in title_lower for kw in keywords):
+            raw_patterns = re.split(r"[,|]", filter_keywords)
+            keywords = [p.strip() for p in raw_patterns if p.strip()]
+            if keywords and not any(
+                FeedParser._check_match(title, kw) for kw in keywords
+            ):
                 return False
 
         # Check excluded keywords (NONE of the keywords may match)
         if filter_exclude:
-            excludes = [
-                kw.strip().lower() for kw in filter_exclude.split(",") if kw.strip()
-            ]
-            if any(kw in title_lower for kw in excludes):
+            raw_patterns = re.split(r"[,|]", filter_exclude)
+            excludes = [p.strip() for p in raw_patterns if p.strip()]
+            if any(FeedParser._check_match(title, ex) for ex in excludes):
                 return False
 
         return True
