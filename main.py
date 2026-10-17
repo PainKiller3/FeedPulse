@@ -2,7 +2,6 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import List
 
 import os
 from database.db import Database
@@ -112,14 +111,13 @@ async def main() -> None:
     # 5. Start Background Poller
     await poller.start()
 
-    # 6. Prepare bot runner tasks
-    tasks: List[asyncio.Task] = []
-
+    # 6. Start bot services
+    discord_task = None
     if telegram_service:
-        tasks.append(asyncio.create_task(telegram_service.start()))
+        await telegram_service.start()
 
     if discord_service:
-        tasks.append(asyncio.create_task(discord_service.start()))
+        discord_task = asyncio.create_task(discord_service.start())
 
     # Graceful shutdown handler
     stop_event = asyncio.Event()
@@ -132,7 +130,7 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, handle_signal)
-        except NotImplementedError:
+        except (NotImplementedError, AttributeError):
             # Signal handling on Windows
             pass
 
@@ -141,8 +139,16 @@ async def main() -> None:
     )
 
     try:
-        # Run until interrupted
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if discord_task:
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                [discord_task, stop_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for p in pending:
+                p.cancel()
+        else:
+            await stop_event.wait()
     except (asyncio.CancelledError, KeyboardInterrupt):
         pass
     finally:
