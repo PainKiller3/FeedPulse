@@ -86,6 +86,21 @@ class Database:
             * 86400,  # Automatically removes items older than 14 days
         )
 
+        # 4. Alerted media collection indexes for cross-group deduplication with TTL (14 days)
+        await self.db.alerted_media.create_index(
+            [
+                ("platform", ASCENDING),
+                ("target_id", ASCENDING),
+                ("thread_id", ASCENDING),
+                ("canonical_key", ASCENDING),
+            ],
+            unique=True,
+        )
+        await self.db.alerted_media.create_index(
+            [("alerted_at", ASCENDING)],
+            expireAfterSeconds=14 * 86400,
+        )
+
         logger.info("MongoDB collections and indexes initialized successfully")
 
     async def _get_next_sequence(self, name: str = "feed_id") -> int:
@@ -531,3 +546,47 @@ class Database:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         res = await self.db.seen_items.delete_many({"seen_at": {"$lt": cutoff}})
         return res.deleted_count
+
+    async def is_media_alerted(
+        self,
+        platform: str,
+        target_id: str,
+        canonical_key: Optional[str],
+        thread_id: Optional[int] = None,
+    ) -> bool:
+        """Check if this canonical media release has already been alerted to this destination."""
+        if not canonical_key:
+            return False
+        doc = await self.db.alerted_media.find_one(
+            {
+                "platform": platform.lower(),
+                "target_id": str(target_id),
+                "thread_id": thread_id,
+                "canonical_key": canonical_key,
+            }
+        )
+        return doc is not None
+
+    async def record_media_alerted(
+        self,
+        platform: str,
+        target_id: str,
+        canonical_key: Optional[str],
+        title: str,
+        thread_id: Optional[int] = None,
+    ) -> None:
+        """Record a canonical media release as alerted to a destination to prevent cross-group duplicates."""
+        if not canonical_key:
+            return
+        doc = {
+            "platform": platform.lower(),
+            "target_id": str(target_id),
+            "thread_id": thread_id,
+            "canonical_key": canonical_key,
+            "title": title,
+            "alerted_at": datetime.now(timezone.utc),
+        }
+        try:
+            await self.db.alerted_media.insert_one(doc)
+        except DuplicateKeyError:
+            pass

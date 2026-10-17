@@ -55,6 +55,11 @@ MAX_FEEDS_PER_USER = int(
     or getattr(config, "MAX_FEEDS_PER_USER", 25)
     or 25
 )
+SMART_TITLE_DEDUPLICATION = (
+    os.environ.get("SMART_TITLE_DEDUPLICATION", "").lower() in ("true", "1", "yes")
+    if "SMART_TITLE_DEDUPLICATION" in os.environ
+    else bool(getattr(config, "SMART_TITLE_DEDUPLICATION", False))
+)
 
 if sys.platform == "win32":
     try:
@@ -120,7 +125,13 @@ async def main() -> None:
 
     # 3. Initialize Dispatcher & Background Poller
     dispatcher = NotificationDispatcher()
-    poller = FeedPoller(db, dispatcher)
+    poller = FeedPoller(
+        db, dispatcher, smart_title_deduplication=SMART_TITLE_DEDUPLICATION
+    )
+    logger.info(
+        "Deduplication: Smart Cross-Group Title Deduplication is %s",
+        "ENABLED" if SMART_TITLE_DEDUPLICATION else "DISABLED",
+    )
 
     # 4. Instantiate Bot Services
     telegram_service = None

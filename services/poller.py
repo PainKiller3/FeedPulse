@@ -27,9 +27,15 @@ logger = logging.getLogger(__name__)
 class FeedPoller:
     """Background engine that periodically fetches feeds and dispatches alerts for new items."""
 
-    def __init__(self, db: Database, dispatcher: NotificationDispatcher):
+    def __init__(
+        self,
+        db: Database,
+        dispatcher: NotificationDispatcher,
+        smart_title_deduplication: bool = False,
+    ):
         self.db = db
         self.dispatcher = dispatcher
+        self.smart_title_deduplication = smart_title_deduplication
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._session: Optional[aiohttp.ClientSession] = None
@@ -243,12 +249,36 @@ class FeedPoller:
             if dest_key in sent_destinations:
                 continue
 
+            # Smart cross-group title deduplication (e.g. Immortals vs PSA for same movie & resolution)
+            if self.smart_title_deduplication and item.canonical_media_key:
+                already_alerted = await self.db.is_media_alerted(
+                    platform, target_id, item.canonical_media_key, thread_id=thread_id
+                )
+                if already_alerted:
+                    logger.info(
+                        "Skipping cross-group duplicate for %s:%s (thread: %s) — '%s' already alerted ('%s')",
+                        platform,
+                        target_id,
+                        thread_id,
+                        item.canonical_media_key,
+                        item.title,
+                    )
+                    continue
+
             try:
                 success = await self.dispatcher.dispatch(
                     platform, target_id, item, feed_title, thread_id=thread_id
                 )
                 if success:
                     sent_destinations.add(dest_key)
+                    if self.smart_title_deduplication and item.canonical_media_key:
+                        await self.db.record_media_alerted(
+                            platform,
+                            target_id,
+                            item.canonical_media_key,
+                            item.title,
+                            thread_id=thread_id,
+                        )
             except Exception as e:
                 logger.error(
                     "Failed to dispatch alert to %s:%s (thread: %s): %s",

@@ -47,6 +47,7 @@ class FeedItem:
     info_hash: Optional[str] = None
     magnet_uri: Optional[str] = None
     description: Optional[str] = None
+    canonical_media_key: Optional[str] = None
 
     @property
     def is_torrent(self) -> bool:
@@ -74,6 +75,81 @@ class FeedParser:
         for tr in trackers_to_use:
             params.append(("tr", tr))
         return "magnet:?" + urllib.parse.urlencode(params, safe=":")
+
+    @staticmethod
+    def normalize_media_title(title: str) -> str:
+        """
+        Normalize media release titles to a canonical identity for cross-group deduplication.
+        Example: 'Deadpool.and.Wolverine.2024.1080p.WEB-DL.x265-Immortals'
+        Returns: 'deadpool and wolverine 2024 1080p'
+        """
+        cleaned = title.strip()
+        # Remove leading release group tags like [SubsPlease], [YTS.MX], [Erai-raws]
+        cleaned = re.sub(r"^\s*\[[^\]]+\]\s*", "", cleaned)
+        # Remove trailing hashes like [ABCD1234] or (ABCD1234)
+        cleaned = re.sub(r"[\[\(][0-9a-fA-F]{8}[\]\)]", "", cleaned)
+
+        # 1. Detect Resolution
+        res_match = re.search(
+            r"\b(2160p|4k|1080p|1080i|720p|576p|480p)\b", cleaned, re.IGNORECASE
+        )
+        res = res_match.group(1).lower() if res_match else ""
+        if res == "4k":
+            res = "2160p"
+
+        # 2. Detect Season & Episode (e.g. S02E01, 2x01, Season 2 Episode 1)
+        se_match = re.search(
+            r"\b(?:s(\d{1,2})[.\s_-]*e(\d{1,3})|(\d{1,2})x(\d{1,3}))\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+        se_tag = ""
+        anime_match = None
+        if se_match:
+            s = int(se_match.group(1) or se_match.group(3))
+            e = int(se_match.group(2) or se_match.group(4))
+            se_tag = f"s{s:02d}e{e:02d}"
+        else:
+            # Detect Anime episode number: e.g. ' - 1100 ' or ' E1100 '
+            anime_match = re.search(
+                r"(?:-\s*(\d{2,4})|\be(\d{1,4})\b)", cleaned, re.IGNORECASE
+            )
+            if anime_match:
+                ep = int(anime_match.group(1) or anime_match.group(2))
+                se_tag = f"e{ep}"
+
+        # 3. Detect Year (19xx or 20xx)
+        year_match = re.search(r"\b(19\d\d|20\d\d)\b", cleaned)
+        year = year_match.group(1) if year_match else ""
+
+        # 4. Find cut-off position for base title
+        cut_positions = []
+        if se_match:
+            cut_positions.append(se_match.start())
+        elif anime_match:
+            cut_positions.append(anime_match.start())
+        if year_match:
+            cut_positions.append(year_match.start())
+        if res_match:
+            cut_positions.append(res_match.start())
+
+        if cut_positions:
+            base_title = cleaned[: min(cut_positions)]
+        else:
+            base_title = cleaned
+
+        # Clean punctuation and extra spaces
+        base_title = re.sub(r"[\.\_\-\(\)\[\]\{\}\:]+", " ", base_title)
+        base_title = re.sub(r"\s+", " ", base_title).strip().lower()
+
+        parts = [base_title]
+        if year:
+            parts.append(year)
+        if se_tag:
+            parts.append(se_tag)
+        if res:
+            parts.append(res)
+        return " ".join(parts)
 
     @classmethod
     def extract_item(cls, entry: Any) -> FeedItem:
@@ -233,6 +309,8 @@ class FeedParser:
         else:
             item_key = f"hash:{hashlib.sha256((title + (pub_date or '')).encode('utf-8')).hexdigest()}"
 
+        canonical_key = cls.normalize_media_title(title)
+
         return FeedItem(
             title=html.unescape(title),
             link=link,
@@ -248,6 +326,7 @@ class FeedParser:
             info_hash=info_hash,
             magnet_uri=magnet_uri,
             description=description,
+            canonical_media_key=canonical_key,
         )
 
     @classmethod

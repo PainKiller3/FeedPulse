@@ -23,6 +23,7 @@ INITIAL_ITEMS_TO_ALERT = (
     0  # How many existing items to alert on first add (0 = only new uploads)
 )
 MAX_ITEMS_PER_CHECK = 15  # Max items alerted per check (flood protection)
+SMART_TITLE_DEDUPLICATION = False  # Prevent duplicate alerts for the same movie/episode across different release groups (default: False)
 USER_AGENT = (
     "FeedPulse/1.0 (RSS Torrent Notifier; https://github.com/PainKiller3/FeedPulse)"
 )
