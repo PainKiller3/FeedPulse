@@ -1,6 +1,6 @@
 import html
 import logging
-from typing import Any
+from typing import Any, Optional
 from parser.feed_parser import FeedItem
 
 logger = logging.getLogger(__name__)
@@ -88,9 +88,13 @@ class NotificationDispatcher:
             return "\n".join(lines).strip(), keyboard
 
     async def send_telegram(
-        self, chat_id: str, item: FeedItem, feed_title: str
+        self,
+        chat_id: str,
+        item: FeedItem,
+        feed_title: str,
+        thread_id: Optional[int] = None,
     ) -> bool:
-        """Send a notification message to a Telegram chat/channel."""
+        """Send a notification message to a Telegram chat, channel, or forum topic."""
         if not self.telegram_bot:
             logger.debug(
                 "Telegram bot not configured; skipping Telegram alert to %s", chat_id
@@ -99,17 +103,24 @@ class NotificationDispatcher:
 
         try:
             text, reply_markup = self.format_telegram_message(item, feed_title)
-            await self.telegram_bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-                disable_web_page_preview=False,
-            )
+            send_kwargs = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": reply_markup,
+                "disable_web_page_preview": False,
+            }
+            if thread_id is not None:
+                send_kwargs["message_thread_id"] = int(thread_id)
+
+            await self.telegram_bot.send_message(**send_kwargs)
             return True
         except Exception as e:
             logger.error(
-                "Failed to send Telegram notification to chat %s: %s", chat_id, e
+                "Failed to send Telegram notification to chat %s (thread: %s): %s",
+                chat_id,
+                thread_id,
+                e,
             )
             return False
 
@@ -205,12 +216,19 @@ class NotificationDispatcher:
     # ---------------- Unified Dispatcher ----------------
 
     async def dispatch(
-        self, platform: str, target_id: str, item: FeedItem, feed_title: str
+        self,
+        platform: str,
+        target_id: str,
+        item: FeedItem,
+        feed_title: str,
+        thread_id: Optional[int] = None,
     ) -> bool:
         """Route notification to either Telegram or Discord based on platform string."""
         platform = platform.lower()
         if platform == "telegram":
-            return await self.send_telegram(target_id, item, feed_title)
+            return await self.send_telegram(
+                target_id, item, feed_title, thread_id=thread_id
+            )
         elif platform == "discord":
             return await self.send_discord(target_id, item, feed_title)
         else:

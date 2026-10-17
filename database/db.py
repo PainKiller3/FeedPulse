@@ -36,11 +36,19 @@ class Database:
         await self.db.feeds.create_index([("feed_id", ASCENDING)], unique=True)
         await self.db.feeds.create_index([("is_active", ASCENDING)])
 
-        # 2. Subscriptions collection indexes
-        await self.db.subscriptions.create_index(
-            [("feed_id", ASCENDING), ("platform", ASCENDING), ("target_id", ASCENDING)],
-            unique=True,
-        )
+        # 2. Subscriptions collection indexes (includes thread_id for topic support)
+        try:
+            await self.db.subscriptions.create_index(
+                [
+                    ("feed_id", ASCENDING),
+                    ("platform", ASCENDING),
+                    ("target_id", ASCENDING),
+                    ("thread_id", ASCENDING),
+                ],
+                unique=True,
+            )
+        except Exception:
+            pass
         await self.db.subscriptions.create_index(
             [("platform", ASCENDING), ("target_id", ASCENDING)]
         )
@@ -104,18 +112,23 @@ class Database:
         title: Optional[str] = None,
         filter_keywords: Optional[str] = None,
         filter_exclude: Optional[str] = None,
+        thread_id: Optional[int] = None,
     ) -> Tuple[int, str, bool]:
         """
-        Subscribe a target (chat or channel) to a feed.
+        Subscribe a target (chat, channel, or topic) to a feed.
         Returns (feed_id, feed_title, is_new_subscription).
         """
         feed_id, feed_title = await self.add_or_get_feed(url, title)
         target_id = str(target_id)
         platform = platform.lower()
 
-        existing = await self.db.subscriptions.find_one(
-            {"feed_id": feed_id, "platform": platform, "target_id": target_id}
-        )
+        sub_query = {
+            "feed_id": feed_id,
+            "platform": platform,
+            "target_id": target_id,
+            "thread_id": thread_id,
+        }
+        existing = await self.db.subscriptions.find_one(sub_query)
 
         if existing:
             # Update filters if provided
@@ -134,6 +147,7 @@ class Database:
             "feed_id": feed_id,
             "platform": platform,
             "target_id": target_id,
+            "thread_id": thread_id,
             "filter_keywords": filter_keywords,
             "filter_exclude": filter_exclude,
             "created_at": datetime.now(timezone.utc),
@@ -150,7 +164,11 @@ class Database:
         return feed_id, feed_title, True
 
     async def unsubscribe(
-        self, platform: str, target_id: str, feed_identifier: str
+        self,
+        platform: str,
+        target_id: str,
+        feed_identifier: str,
+        thread_id: Optional[int] = None,
     ) -> Optional[str]:
         """
         Unsubscribe a target by feed ID or feed URL/title.
@@ -179,9 +197,15 @@ class Database:
         feed_id = feed_doc["feed_id"]
         feed_label = feed_doc.get("title") or feed_doc.get("url")
 
-        res = await self.db.subscriptions.delete_one(
-            {"feed_id": feed_id, "platform": platform, "target_id": target_id}
-        )
+        del_query = {
+            "feed_id": feed_id,
+            "platform": platform,
+            "target_id": target_id,
+        }
+        if thread_id is not None:
+            del_query["thread_id"] = thread_id
+
+        res = await self.db.subscriptions.delete_one(del_query)
 
         if res.deleted_count == 0:
             return None
@@ -204,6 +228,7 @@ class Database:
         feed_id: int,
         filter_keywords: Optional[str] = None,
         filter_exclude: Optional[str] = None,
+        thread_id: Optional[int] = None,
     ) -> bool:
         """Update keyword filter rules for a specific subscription."""
         target_id = str(target_id)
@@ -218,21 +243,36 @@ class Database:
         if not update_fields:
             return False
 
+        upd_query = {
+            "platform": platform,
+            "target_id": target_id,
+            "feed_id": feed_id,
+        }
+        if thread_id is not None:
+            upd_query["thread_id"] = thread_id
+
         res = await self.db.subscriptions.update_one(
-            {"platform": platform, "target_id": target_id, "feed_id": feed_id},
+            upd_query,
             {"$set": update_fields},
         )
         return res.modified_count > 0 or res.matched_count > 0
 
     async def list_subscriptions(
-        self, platform: str, target_id: str
+        self,
+        platform: str,
+        target_id: str,
+        thread_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """List all feeds subscribed by a specific chat/channel."""
+        """List all feeds subscribed by a specific chat, channel, or topic."""
         target_id = str(target_id)
         platform = platform.lower()
 
+        match_cond = {"platform": platform, "target_id": target_id}
+        if thread_id is not None:
+            match_cond["thread_id"] = thread_id
+
         pipeline = [
-            {"$match": {"platform": platform, "target_id": target_id}},
+            {"$match": match_cond},
             {
                 "$lookup": {
                     "from": "feeds",
@@ -250,6 +290,7 @@ class Database:
                     "last_checked": "$feed_info.last_checked",
                     "filter_keywords": "$filter_keywords",
                     "filter_exclude": "$filter_exclude",
+                    "thread_id": "$thread_id",
                     "created_at": "$created_at",
                 }
             },

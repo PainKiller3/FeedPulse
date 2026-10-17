@@ -235,9 +235,16 @@ class FeedPoller:
                 )
                 continue
 
+            thread_id = sub.get("thread_id")
             try:
-                await self.dispatcher.dispatch(platform, target_id, item, feed_title)
+                await self.dispatcher.dispatch(
+                    platform, target_id, item, feed_title, thread_id=thread_id
+                )
             except Exception as e:
                 logger.error(
-                    "Failed to dispatch alert to %s:%s: %s", platform, target_id, e
+                    "Failed to dispatch alert to %s:%s (thread: %s): %s",
+                    platform,
+                    target_id,
+                    thread_id,
+                    e,
                 )

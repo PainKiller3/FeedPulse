@@ -29,6 +29,28 @@ POLL_INTERVAL_SECONDS = int(
     or getattr(config, "POLL_INTERVAL_SECONDS", 120)
 )
 
+
+def _parse_id_list(val) -> list[int]:
+    """Parse integer IDs from lists or comma/space-separated strings."""
+    if isinstance(val, (list, tuple, set)):
+        return [int(x) for x in val if str(x).lstrip("-").isdigit()]
+    if isinstance(val, str) and val.strip():
+        parts = [p.strip() for p in val.replace(",", " ").split()]
+        return [int(p) for p in parts if p.lstrip("-").isdigit()]
+    return []
+
+
+OWNER_ID = int(os.environ.get("OWNER_ID") or getattr(config, "OWNER_ID", 0) or 0)
+AUTHORIZED_CHATS = _parse_id_list(
+    os.environ.get("AUTHORIZED_CHATS") or getattr(config, "AUTHORIZED_CHATS", [])
+)
+SUDO_USERS = _parse_id_list(
+    os.environ.get("SUDO_USERS")
+    or os.environ.get("AUTHORIZED_USERS")
+    or getattr(config, "SUDO_USERS", [])
+    or getattr(config, "AUTHORIZED_USERS", [])
+)
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -101,7 +123,25 @@ async def main() -> None:
 
     if has_telegram:
         logger.info("Initializing Telegram Bot Service...")
-        telegram_service = TelegramBotService(BOT_TOKEN, db, poller, dispatcher)
+        if OWNER_ID:
+            logger.info("Security: Bot Owner ID set to %s", OWNER_ID)
+        if SUDO_USERS:
+            logger.info(
+                "Security: %d Sudo/Authorized User(s) configured", len(SUDO_USERS)
+            )
+        if AUTHORIZED_CHATS:
+            logger.info(
+                "Security: %d Authorized Chat(s) configured", len(AUTHORIZED_CHATS)
+            )
+        telegram_service = TelegramBotService(
+            BOT_TOKEN,
+            db,
+            poller,
+            dispatcher,
+            owner_id=OWNER_ID,
+            authorized_chats=AUTHORIZED_CHATS,
+            sudo_users=SUDO_USERS,
+        )
     else:
         logger.info("Telegram Bot is disabled (BOT_TOKEN not provided).")
 

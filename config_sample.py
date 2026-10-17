@@ -5,6 +5,13 @@ BOT_TOKEN = ""  # Telegram Bot token from @BotFather (e.g. "123456789:ABCdef..."
 DATABASE_URL = ""  # MongoDB URI (e.g. "mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority")
 
 # ==============================================================================
+# ACCESS CONTROL & SECURITY
+# ==============================================================================
+OWNER_ID = 0  # Telegram User ID of bot owner (e.g. 12345678, get via /id or @userinfobot). 0 = open to all.
+AUTHORIZED_CHATS = []  # List of allowed Chat/Group/Channel IDs (e.g. [-1001234567890]). Empty = allow any chat with authorized users.
+SUDO_USERS = []  # List of additional Telegram User IDs authorized to manage feeds (e.g. [123456, 789012])
+
+# ==============================================================================
 # OPTIONAL CONFIG
 # ==============================================================================
 DISCORD_BOT_TOKEN = ""  # Discord Bot token (optional if running Telegram-only)
