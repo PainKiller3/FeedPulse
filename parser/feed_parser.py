@@ -1,3 +1,4 @@
+import json
 import re
 import html
 import logging
@@ -27,6 +28,49 @@ def format_bytes(size_bytes: Optional[int]) -> Optional[str]:
             return f"{size:.2f} {unit}"
         size /= 1024.0
     return f"{size_bytes} B"
+
+
+def parse_size_bytes(size_val: Any) -> Optional[int]:
+    """
+    Parse a byte count or human-readable size string (e.g. '1.5 GB', '700MB', '2500000') into integer bytes.
+    """
+    if size_val is None:
+        return None
+    if isinstance(size_val, (int, float)):
+        return int(size_val)
+    s = str(size_val).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z]+)?$", s)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = (match.group(2) or "b").upper()
+
+    multipliers = {
+        "B": 1,
+        "BYTES": 1,
+        "KB": 1024,
+        "KIB": 1024,
+        "K": 1024,
+        "MB": 1024**2,
+        "MIB": 1024**2,
+        "M": 1024**2,
+        "GB": 1024**3,
+        "GIB": 1024**3,
+        "G": 1024**3,
+        "TB": 1024**4,
+        "TIB": 1024**4,
+        "T": 1024**4,
+        "PB": 1024**5,
+        "PIB": 1024**5,
+        "P": 1024**5,
+    }
+    mult = multipliers.get(unit, 1)
+    return int(number * mult)
 
 
 @dataclass
@@ -309,6 +353,11 @@ class FeedParser:
         else:
             item_key = f"hash:{hashlib.sha256((title + (pub_date or '')).encode('utf-8')).hexdigest()}"
 
+        if not size_str and size_bytes:
+            size_str = format_bytes(size_bytes)
+        elif size_str and not size_bytes:
+            size_bytes = parse_size_bytes(size_str)
+
         canonical_key = cls.normalize_media_title(title)
 
         return FeedItem(
@@ -330,6 +379,185 @@ class FeedParser:
         )
 
     @classmethod
+    def _json_to_rss(cls, data: Any, feed_url: str = "") -> Optional[str]:
+        """
+        Convert JSON feed payloads (TorAPI, JSON Feed v1/v1.1, Jackett/Prowlarr JSON endpoints)
+        into standard RSS 2.0 XML with BitTorrent namespaces.
+        """
+        items = []
+        feed_title = "JSON Feed"
+
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            feed_title = (
+                data.get("title")
+                or data.get("feed_title")
+                or data.get("name")
+                or "JSON Feed"
+            )
+            for k in ("items", "data", "results", "torrents", "list"):
+                val = data.get(k)
+                if isinstance(val, list):
+                    items = val
+                    break
+
+        if not items:
+            return None
+
+        def _escape(val: Any) -> str:
+            if val is None:
+                return ""
+            return html.escape(str(val), quote=True)
+
+        entries = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            title = (
+                item.get("Name")
+                or item.get("name")
+                or item.get("title")
+                or item.get("Title")
+                or "Untitled Item"
+            )
+            link = (
+                item.get("Url")
+                or item.get("url")
+                or item.get("link")
+                or item.get("Link")
+                or item.get("details_url")
+                or ""
+            )
+            torrent = (
+                item.get("Torrent")
+                or item.get("torrent")
+                or item.get("DownloadUrl")
+                or item.get("download_url")
+                or item.get("MagnetUrl")
+                or item.get("magnet")
+                or item.get("enclosure")
+                or ""
+            )
+            guid = (
+                item.get("Id")
+                or item.get("id")
+                or item.get("Guid")
+                or item.get("guid")
+                or link
+                or title
+            )
+            pubdate = (
+                item.get("PubDate")
+                or item.get("pubdate")
+                or item.get("date_published")
+                or item.get("created_at")
+                or item.get("published")
+                or ""
+            )
+            category = (
+                item.get("Category")
+                or item.get("category")
+                or item.get("category_name")
+                or item.get("CategoryName")
+                or ""
+            )
+            info_hash = (
+                item.get("Hash")
+                or item.get("hash")
+                or item.get("info_hash")
+                or item.get("InfoHash")
+                or ""
+            )
+            size = (
+                item.get("Size")
+                or item.get("size")
+                or item.get("size_bytes")
+                or item.get("length")
+                or item.get("contentLength")
+                or ""
+            )
+            seeds = (
+                item.get("Seeds")
+                or item.get("seeds")
+                or item.get("seeders")
+                or item.get("Seeders")
+            )
+            leechers = (
+                item.get("Leechers")
+                or item.get("leechers")
+                or item.get("peers")
+                or item.get("Peers")
+            )
+
+            # JSON Feed v1.1 attachments check
+            attachments = item.get("attachments")
+            if isinstance(attachments, list) and attachments:
+                first_att = attachments[0]
+                if isinstance(first_att, dict):
+                    if not torrent:
+                        torrent = first_att.get("url", "")
+                    if not size:
+                        size = first_att.get("size_in_bytes", "")
+
+            desc = (
+                item.get("description")
+                or item.get("content_text")
+                or item.get("content_html")
+                or (f"Size: {size}" if size else "")
+            )
+
+            entry_xml = [
+                "<item>",
+                f"<title>{_escape(title)}</title>",
+                f"<link>{_escape(link)}</link>",
+                f'<guid isPermaLink="false">{_escape(guid)}</guid>',
+            ]
+            if pubdate:
+                entry_xml.append(f"<pubDate>{_escape(pubdate)}</pubDate>")
+            if category:
+                entry_xml.append(f"<category>{_escape(category)}</category>")
+            if torrent:
+                if str(torrent).startswith("magnet:"):
+                    if not link:
+                        entry_xml.append(f"<link>{_escape(torrent)}</link>")
+                else:
+                    sz_attr = f' length="{_escape(size)}"' if size else ""
+                    entry_xml.append(
+                        f'<enclosure url="{_escape(torrent)}" type="application/x-bittorrent"{sz_attr}/>'
+                    )
+            if info_hash:
+                entry_xml.append(
+                    f"<torrent:infoHash>{_escape(info_hash)}</torrent:infoHash>"
+                )
+            if seeds is not None:
+                entry_xml.append(f"<torrent:seeds>{_escape(seeds)}</torrent:seeds>")
+            if leechers is not None:
+                entry_xml.append(f"<torrent:peers>{_escape(leechers)}</torrent:peers>")
+            if size:
+                entry_xml.append(
+                    f"<torrent:contentLength>{_escape(size)}</torrent:contentLength>"
+                )
+            if desc:
+                entry_xml.append(f"<description>{_escape(desc)}</description>")
+            entry_xml.append("</item>")
+
+            entries.append("\n".join(entry_xml))
+
+        entries_str = "\n".join(entries)
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<rss version="2.0" xmlns:torrent="http://xmlns.ezrss.it/0.1/dtd/">\n'
+            "<channel>\n"
+            f"<title>{_escape(feed_title)}</title>\n"
+            f"<link>{_escape(feed_url)}</link>\n"
+            f"{entries_str}\n"
+            "</channel>\n"
+            "</rss>"
+        )
+
+    @classmethod
     async def fetch_and_parse(
         cls,
         session: aiohttp.ClientSession,
@@ -338,12 +566,12 @@ class FeedParser:
         modified: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[str], Optional[str], List[FeedItem], int]:
         """
-        Fetch RSS/Atom XML asynchronously with HTTP conditional GET headers.
+        Fetch RSS/Atom XML or JSON feeds asynchronously with HTTP conditional GET headers.
         Returns (feed_title, new_etag, new_modified, list_of_items, status_code).
         """
         headers = {
             "User-Agent": USER_AGENT,
-            "Accept": "application/rss+xml, application/xml, text/xml, application/atom+xml, text/html, */*",
+            "Accept": "application/rss+xml, application/xml, text/xml, application/atom+xml, application/json, text/html, */*",
         }
         if etag:
             headers["If-None-Match"] = etag
@@ -366,8 +594,24 @@ class FeedParser:
                 new_modified = resp.headers.get("Last-Modified")
                 content = await resp.read()
 
+                # Check if payload is JSON (TorAPI, JSON Feed v1, Jackett/Prowlarr endpoints)
+                rss_xml = None
+                stripped = content.strip()
+                if stripped.startswith(b"{") or stripped.startswith(b"["):
+                    try:
+                        json_data = json.loads(
+                            content.decode("utf-8", errors="replace")
+                        )
+                        rss_xml = cls._json_to_rss(json_data, feed_url=url)
+                    except Exception as e:
+                        logger.debug(
+                            "Content from %s is not JSON (%s), parsing as XML", url, e
+                        )
+
                 # Parse XML using feedparser
-                parsed = feedparser.parse(content)
+                parsed = feedparser.parse(
+                    rss_xml.encode("utf-8") if rss_xml else content
+                )
                 feed_title = parsed.feed.get("title", "").strip() or url
 
                 items = [cls.extract_item(entry) for entry in parsed.entries]
