@@ -2,7 +2,7 @@ import html
 import io
 import logging
 import shlex
-from typing import Optional, List, Set, Tuple
+from typing import Optional, List, Set, Tuple, Dict
 import aiohttp
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -46,7 +46,9 @@ class TelegramBotService:
         self.dispatcher = dispatcher
         self.owner_id: int = owner_id or 0
         self.authorized_chats: Set[int] = set(authorized_chats or [])
+        self.authorized_threads: Dict[int, Set[int]] = {}
         self.sudo_users: Set[int] = set(sudo_users or [])
+        self.authorized_users: Set[int] = set()
         self.max_feeds_per_user: int = max_feeds_per_user
         self.application: Optional[Application] = None
 
@@ -59,12 +61,12 @@ class TelegramBotService:
         )
 
     async def is_admin_or_super(self, update: Update) -> bool:
-        """Check if caller has bot superuser or group admin privileges."""
+        """Check if caller has bot superuser, authorized user, or group admin privileges."""
         user = update.effective_user
         chat = update.effective_chat
         if not user:
             return False
-        if self.is_super_user(user.id):
+        if self.is_super_user(user.id) or (user.id in self.authorized_users):
             return True
         if chat and chat.type in ("group", "supergroup"):
             try:
@@ -85,6 +87,34 @@ class TelegramBotService:
 
         # Connect bot instance to dispatcher so poller can send messages
         self.dispatcher.set_telegram_bot(self.application.bot)
+
+        # Load persisted authorizations from MongoDB
+        try:
+            stored_auths = await self.db.get_all_authorizations()
+            for auth in stored_auths:
+                t_id = auth.get("target_id")
+                if not t_id:
+                    continue
+                th_id = auth.get("thread_id")
+                id_type = auth.get("id_type", "chat")
+                if id_type == "sudo":
+                    self.sudo_users.add(t_id)
+                elif id_type == "user":
+                    self.authorized_users.add(t_id)
+                else:
+                    self.authorized_chats.add(t_id)
+                    if th_id is not None:
+                        self.authorized_threads.setdefault(t_id, set()).add(th_id)
+            if stored_auths:
+                logger.info(
+                    "Loaded %d authorizations from database (Total chats: %d, users: %d, sudo: %d)",
+                    len(stored_auths),
+                    len(self.authorized_chats),
+                    len(self.authorized_users),
+                    len(self.sudo_users),
+                )
+        except Exception as e:
+            logger.warning("Could not load authorizations from database: %s", e)
 
         # Register command handlers
         self.application.add_handler(CommandHandler(["start", "help"], self.cmd_help))
@@ -109,6 +139,19 @@ class TelegramBotService:
         self.application.add_handler(
             CommandHandler(["get", "preview", "inspect"], self.cmd_get)
         )
+        self.application.add_handler(
+            CommandHandler(["authorize", "a"], self.cmd_authorize)
+        )
+        self.application.add_handler(
+            CommandHandler(["unauthorize", "ua"], self.cmd_unauthorize)
+        )
+        self.application.add_handler(
+            CommandHandler(
+                ["authlist", "authorizations", "authorized"], self.cmd_authlist
+            )
+        )
+        self.application.add_handler(CommandHandler("addsudo", self.cmd_addsudo))
+        self.application.add_handler(CommandHandler("rmsudo", self.cmd_rmsudo))
         self.application.add_handler(CommandHandler("check", self.cmd_check))
         self.application.add_handler(CommandHandler("test", self.cmd_test))
         self.application.add_handler(
@@ -137,6 +180,9 @@ class TelegramBotService:
             BotCommand("edit", "Edit a feed subscription in-place"),
             BotCommand("remove", "Unsubscribe from a feed"),
             BotCommand("filter", "Configure keyword filters (inc=/exc=)"),
+            BotCommand("authorize", "Authorize a user, chat, or topic (/a)"),
+            BotCommand("unauthorize", "Revoke authorization (/ua)"),
+            BotCommand("authlist", "View all authorized users and chats"),
             BotCommand("check", "Force an immediate feed check"),
             BotCommand("test", "Preview sample torrent notification"),
             BotCommand("id", "Show Chat ID, Topic ID, and User ID"),
@@ -168,8 +214,13 @@ class TelegramBotService:
         Verify if the calling user and chat are permitted to manage feeds.
         Returns True if authorized, False otherwise.
         """
-        # If no access controls are set (OWNER_ID=0, no SUDO, no AUTH_CHATS), open mode
-        if not self.owner_id and not self.sudo_users and not self.authorized_chats:
+        # If no access controls are set (OWNER_ID=0, no SUDO, no AUTH_CHATS, no AUTH_USERS), open mode
+        if (
+            not self.owner_id
+            and not self.sudo_users
+            and not self.authorized_chats
+            and not self.authorized_users
+        ):
             return True
 
         user = update.effective_user
@@ -181,12 +232,14 @@ class TelegramBotService:
         if (self.owner_id and user_id == self.owner_id) or (user_id in self.sudo_users):
             return True
 
-        # In private DM: only owner and sudo users are allowed
+        # In private DM: allowed if user is in authorized_users or authorized_chats
         if chat and chat.type == "private":
+            if user_id in self.authorized_users or user_id in self.authorized_chats:
+                return True
             await update.effective_message.reply_html(
                 f"⛔ <b>Access Denied:</b> You are not authorized to control this bot.\n\n"
                 f"👤 <b>Your User ID:</b> <code>{user_id}</code>\n"
-                "Please configure this ID in <code>OWNER_ID</code> or <code>SUDO_USERS</code>."
+                "Ask the Bot Owner to authorize you via <code>/authorize</code>."
             )
             return False
 
@@ -199,6 +252,24 @@ class TelegramBotService:
                 user_id,
             )
             return False
+
+        # If specific topics in this chat are restricted
+        if chat_id in self.authorized_threads and self.authorized_threads[chat_id]:
+            msg = update.effective_message
+            is_topic = getattr(msg, "is_topic_message", False)
+            thread_id = msg.message_thread_id if is_topic else None
+            if thread_id and thread_id not in self.authorized_threads[chat_id]:
+                logger.warning(
+                    "Unauthorized topic attempt in chat %s topic %s by user %s",
+                    chat_id,
+                    thread_id,
+                    user_id,
+                )
+                return False
+
+        # If user is explicitly in authorized_users list
+        if user_id in self.authorized_users:
+            return True
 
         # If in an authorized group, check if user is group Administrator or Creator
         if chat and chat.type in ("group", "supergroup"):
@@ -2290,6 +2361,9 @@ class TelegramBotService:
                 "• <code>/resume &lt;id|all&gt;</code> — Resume notifications\n"
                 "• <code>/remove &lt;id&gt;</code> — Unsubscribe\n"
                 "• <code>/filter &lt;id&gt;</code> — Update keywords\n"
+                "• <code>/authorize &lt;id&gt;</code> — Authorize user/chat (/a)\n"
+                "• <code>/unauthorize &lt;id&gt;</code> — Revoke access (/ua)\n"
+                "• <code>/authlist</code> — View authorized entities\n"
                 "• <code>/check</code> — Force immediate check"
             )
             try:
@@ -2302,3 +2376,362 @@ class TelegramBotService:
             except Exception:
                 pass
             return
+
+    # ---------------- Dynamic Authorization Commands ----------------
+
+    async def cmd_authorize(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Authorize a user, group, channel, or forum topic (/authorize or /a)."""
+        user = update.effective_user
+        user_id = user.id if user else 0
+        if not self.is_super_user(user_id):
+            await update.effective_message.reply_html(
+                "⛔ <b>Permission Denied:</b> Only the Bot Owner or Sudo Users can manage authorizations."
+            )
+            return
+
+        reply = update.effective_message.reply_to_message
+        target_id: Optional[int] = None
+        thread_id: Optional[int] = None
+        id_type: str = "chat"
+        title: str = ""
+
+        raw_args = context.args or []
+        flags = [a.lower() for a in raw_args if a.startswith("-")]
+        clean_args = [a for a in raw_args if not a.startswith("-")]
+
+        if "-sudo" in flags:
+            id_type = "sudo"
+        elif "-user" in flags:
+            id_type = "user"
+        elif "-chat" in flags:
+            id_type = "chat"
+
+        if clean_args:
+            arg = clean_args[0].strip()
+            if "|" in arg:
+                parts = arg.split("|", 1)
+                try:
+                    target_id = int(parts[0].strip())
+                    thread_id = int(parts[1].strip())
+                    id_type = "chat"
+                except ValueError:
+                    await update.effective_message.reply_html(
+                        "⚠️ <b>Invalid Format!</b> Use <code>/authorize &lt;chat_id&gt;|&lt;thread_id&gt;</code>"
+                    )
+                    return
+            else:
+                try:
+                    target_id = int(arg)
+                    if (
+                        id_type != "sudo"
+                        and "-user" not in flags
+                        and "-chat" not in flags
+                    ):
+                        id_type = "chat" if target_id < 0 else "user"
+                except ValueError:
+                    await update.effective_message.reply_html(
+                        "⚠️ <b>Invalid ID!</b> Please provide a numeric Chat ID or User ID."
+                    )
+                    return
+
+            title = f"{'Chat' if id_type == 'chat' else 'User'} {target_id}"
+
+        elif reply and reply.from_user:
+            target_id = reply.from_user.id
+            if id_type != "sudo":
+                id_type = "user"
+            title = (
+                reply.from_user.full_name or reply.from_user.username or str(target_id)
+            )
+            thread_id = None
+
+        else:
+            chat = update.effective_chat
+            if not chat:
+                return
+            if chat.type == "private":
+                await update.effective_message.reply_html(
+                    "ℹ️ <b>Authorization Usage:</b>\n\n"
+                    "• <code>/authorize</code> (inside a group/channel/topic or reply to user)\n"
+                    "• <code>/authorize &lt;chat_id|user_id&gt;</code>\n"
+                    "• <code>/authorize &lt;chat_id&gt;|&lt;topic_id&gt;</code>\n"
+                    "• <code>/authorize &lt;user_id&gt; -sudo</code> (Add superuser)"
+                )
+                return
+            else:
+                target_id = chat.id
+                id_type = "chat"
+                title = chat.title or str(chat.id)
+                msg = update.effective_message
+                is_topic = getattr(msg, "is_topic_message", False)
+                thread_id = msg.message_thread_id if is_topic else None
+
+        if not target_id:
+            await update.effective_message.reply_html(
+                "⚠️ Could not resolve target ID for authorization."
+            )
+            return
+
+        # Persist in MongoDB
+        await self.db.add_authorization(
+            target_id=target_id,
+            thread_id=thread_id,
+            id_type=id_type,
+            title=title,
+            added_by=user_id,
+        )
+
+        # Update in-memory cache
+        if id_type == "sudo":
+            self.sudo_users.add(target_id)
+        elif id_type == "user":
+            self.authorized_users.add(target_id)
+        else:
+            self.authorized_chats.add(target_id)
+            if thread_id is not None:
+                self.authorized_threads.setdefault(target_id, set()).add(thread_id)
+
+        type_label = (
+            "🛡️ Sudo Superuser"
+            if id_type == "sudo"
+            else ("👤 Authorized User" if id_type == "user" else "💬 Authorized Chat")
+        )
+        topic_info = (
+            f"\n🧵 <b>Topic ID:</b> <code>{thread_id}</code>"
+            if thread_id is not None
+            else ""
+        )
+        await update.effective_message.reply_html(
+            f"✅ <b>Successfully Authorized!</b>\n\n"
+            f"🏷 <b>Type:</b> {type_label}\n"
+            f"🆔 <b>Target ID:</b> <code>{target_id}</code>"
+            f"{topic_info}\n"
+            f"📝 <b>Title:</b> {html.escape(title or 'N/A')}\n\n"
+            f"<i>Permissions granted immediately and saved in MongoDB.</i>"
+        )
+
+    async def cmd_unauthorize(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Revoke authorization for a user, group, channel, or topic (/unauthorize or /ua)."""
+        user = update.effective_user
+        user_id = user.id if user else 0
+        if not self.is_super_user(user_id):
+            await update.effective_message.reply_html(
+                "⛔ <b>Permission Denied:</b> Only the Bot Owner or Sudo Users can manage authorizations."
+            )
+            return
+
+        reply = update.effective_message.reply_to_message
+        target_id: Optional[int] = None
+        thread_id: Optional[int] = None
+
+        if context.args:
+            arg = context.args[0].strip()
+            if "|" in arg:
+                parts = arg.split("|", 1)
+                try:
+                    target_id = int(parts[0].strip())
+                    thread_id = int(parts[1].strip())
+                except ValueError:
+                    await update.effective_message.reply_html(
+                        "⚠️ <b>Invalid Format!</b> Use <code>/unauthorize &lt;chat_id&gt;|&lt;thread_id&gt;</code>"
+                    )
+                    return
+            else:
+                try:
+                    target_id = int(arg)
+                except ValueError:
+                    await update.effective_message.reply_html(
+                        "⚠️ <b>Invalid ID!</b> Please provide a numeric Chat ID or User ID."
+                    )
+                    return
+        elif reply and reply.from_user:
+            target_id = reply.from_user.id
+            thread_id = None
+        else:
+            chat = update.effective_chat
+            if not chat:
+                return
+            if chat.type == "private":
+                await update.effective_message.reply_html(
+                    "ℹ️ <b>Unauthorize Usage:</b>\n"
+                    "• <code>/unauthorize</code> (inside chat to revoke)\n"
+                    "• <code>/unauthorize &lt;id&gt;</code>\n"
+                    "• <code>/unauthorize &lt;chat_id&gt;|&lt;topic_id&gt;</code>"
+                )
+                return
+            else:
+                target_id = chat.id
+                msg = update.effective_message
+                is_topic = getattr(msg, "is_topic_message", False)
+                thread_id = msg.message_thread_id if is_topic else None
+
+        if not target_id:
+            await update.effective_message.reply_html(
+                "⚠️ Target ID could not be determined."
+            )
+            return
+
+        if target_id == self.owner_id:
+            await update.effective_message.reply_html(
+                "⚠️ Cannot unauthorize the Bot Owner!"
+            )
+            return
+
+        # Delete from MongoDB
+        await self.db.remove_authorization(target_id=target_id, thread_id=thread_id)
+
+        # Update in-memory sets
+        self.sudo_users.discard(target_id)
+        self.authorized_users.discard(target_id)
+        if thread_id is not None and target_id in self.authorized_threads:
+            self.authorized_threads[target_id].discard(thread_id)
+            if not self.authorized_threads[target_id]:
+                del self.authorized_threads[target_id]
+                self.authorized_chats.discard(target_id)
+        else:
+            self.authorized_chats.discard(target_id)
+            self.authorized_threads.pop(target_id, None)
+
+        topic_str = (
+            f" (Topic: <code>{thread_id}</code>)" if thread_id is not None else ""
+        )
+        await update.effective_message.reply_html(
+            f"🚫 <b>Authorization Revoked!</b>\n\n"
+            f"🆔 <b>Target ID:</b> <code>{target_id}</code>{topic_str}\n"
+            f"<i>This entity is no longer authorized to manage feeds.</i>"
+        )
+
+    async def cmd_authlist(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """View all authorized chats, topics, users, and sudo accounts."""
+        user = update.effective_user
+        user_id = user.id if user else 0
+        if not self.is_super_user(user_id):
+            await update.effective_message.reply_html(
+                "⛔ <b>Permission Denied:</b> Only the Bot Owner or Sudo Users can view authorizations."
+            )
+            return
+
+        lines = ["🛡️ <b>FeedPulse Access Control Overview</b>\n"]
+        lines.append(
+            f"👑 <b>Bot Owner:</b> <code>{self.owner_id or 'Not Configured'}</code>\n"
+        )
+
+        # Sudo users
+        if self.sudo_users:
+            sudo_list = ", ".join(
+                f"<code>{uid}</code>" for uid in sorted(self.sudo_users)
+            )
+            lines.append(f"🛡️ <b>Sudo Users ({len(self.sudo_users)}):</b> {sudo_list}\n")
+        else:
+            lines.append("🛡️ <b>Sudo Users:</b> <i>None</i>\n")
+
+        # Authorized users
+        if self.authorized_users:
+            user_list = ", ".join(
+                f"<code>{uid}</code>" for uid in sorted(self.authorized_users)
+            )
+            lines.append(
+                f"👤 <b>Authorized Users ({len(self.authorized_users)}):</b> {user_list}\n"
+            )
+        else:
+            lines.append("👤 <b>Authorized Users:</b> <i>None</i>\n")
+
+        # Authorized chats
+        if self.authorized_chats:
+            lines.append(f"💬 <b>Authorized Chats ({len(self.authorized_chats)}):</b>")
+            for cid in sorted(self.authorized_chats):
+                threads = self.authorized_threads.get(cid)
+                if threads:
+                    th_str = ", ".join(f"Topic {tid}" for tid in sorted(threads))
+                    lines.append(f"• <code>{cid}</code> ({th_str})")
+                else:
+                    lines.append(f"• <code>{cid}</code> (All Topics / Full Chat)")
+        else:
+            lines.append(
+                "💬 <b>Authorized Chats:</b> <i>None (Open Mode or Unconfigured)</i>"
+            )
+
+        await update.effective_message.reply_html("\n".join(lines))
+
+    async def cmd_addsudo(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Add a sudo superuser (Bot Owner only)."""
+        user = update.effective_user
+        user_id = user.id if user else 0
+        if not self.owner_id or user_id != self.owner_id:
+            await update.effective_message.reply_html(
+                "⛔ <b>Permission Denied:</b> Only the Bot Owner can add Sudo superusers."
+            )
+            return
+
+        reply = update.effective_message.reply_to_message
+        target_id: Optional[int] = None
+        title = ""
+        if context.args:
+            try:
+                target_id = int(context.args[0].strip())
+            except ValueError:
+                await update.effective_message.reply_html("⚠️ Invalid User ID!")
+                return
+        elif reply and reply.from_user:
+            target_id = reply.from_user.id
+            title = (
+                reply.from_user.full_name or reply.from_user.username or str(target_id)
+            )
+
+        if not target_id:
+            await update.effective_message.reply_html(
+                "ℹ️ <b>Usage:</b> <code>/addsudo &lt;user_id&gt;</code> (or reply to user)"
+            )
+            return
+
+        await self.db.add_authorization(
+            target_id=target_id, id_type="sudo", title=title, added_by=user_id
+        )
+        self.sudo_users.add(target_id)
+        await update.effective_message.reply_html(
+            f"🛡️ <b>Sudo User Added:</b> <code>{target_id}</code> is now a superuser."
+        )
+
+    async def cmd_rmsudo(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Remove a sudo superuser (Bot Owner only)."""
+        user = update.effective_user
+        user_id = user.id if user else 0
+        if not self.owner_id or user_id != self.owner_id:
+            await update.effective_message.reply_html(
+                "⛔ <b>Permission Denied:</b> Only the Bot Owner can remove Sudo superusers."
+            )
+            return
+
+        if not context.args:
+            await update.effective_message.reply_html(
+                "ℹ️ <b>Usage:</b> <code>/rmsudo &lt;user_id&gt;</code>"
+            )
+            return
+
+        try:
+            target_id = int(context.args[0].strip())
+        except ValueError:
+            await update.effective_message.reply_html("⚠️ Invalid User ID!")
+            return
+
+        if target_id == self.owner_id:
+            await update.effective_message.reply_html(
+                "⚠️ Cannot remove the Bot Owner from Sudo!"
+            )
+            return
+
+        await self.db.remove_authorization(target_id=target_id)
+        self.sudo_users.discard(target_id)
+        await update.effective_message.reply_html(
+            f"🚫 <b>Sudo User Removed:</b> <code>{target_id}</code> is no longer a superuser."
+        )

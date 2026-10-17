@@ -33,6 +33,9 @@ Both **Telegram** and **Discord** (slash commands + prefix `!`) support the exac
 | `/edit <id>` | Edit a feed in-place (title, filters, or URL) | `/edit 1 -title PSA -inf 1080p` |
 | `/remove <id>` | Unsubscribe and stop monitoring a feed | `/remove 1` |
 | `/filter <id> <rules>` | Configure keyword inclusion/exclusion rules | `/filter 1 inc=1080p,flac exc=cam,sample` |
+| `/authorize <id>` | Authorize a user, chat, or forum topic (`/a`) | `/a -1001234567890` or `/a 12345` |
+| `/unauthorize <id>` | Revoke authorization for a user or chat (`/ua`) | `/ua -1001234567890` |
+| `/authlist` | View all authorized users, chats, and topics | `/authlist` |
 | `/check` | Force an immediate check on active feeds | `/check` |
 | `/test` | Send a preview torrent alert to test formatting | `/test` |
 

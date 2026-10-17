@@ -782,6 +782,104 @@ class DiscordBotService:
             )
             await interaction.response.send_message(embed=embed, view=view)
 
+        @self.bot.tree.command(
+            name="authorize", description="Authorize a channel or user (Admin only)"
+        )
+        @app_commands.describe(
+            target_id="Channel ID or User ID to authorize (default: current channel)",
+            id_type="Type of target ('chat' or 'user', default: chat)",
+        )
+        async def slash_authorize(
+            interaction: discord.Interaction,
+            target_id: Optional[str] = None,
+            id_type: str = "chat",
+        ):
+            perms = getattr(interaction.user, "guild_permissions", None)
+            is_admin = perms and (perms.administrator or perms.manage_guild)
+            if not is_admin:
+                await interaction.response.send_message(
+                    "❌ **Permission Denied:** Administrator or Manage Server permission required.",
+                    ephemeral=True,
+                )
+                return
+
+            tid = (
+                int(target_id)
+                if target_id and target_id.lstrip("-").isdigit()
+                else interaction.channel_id
+            )
+            target_title = (
+                interaction.channel.name
+                if not target_id and hasattr(interaction.channel, "name")
+                else str(tid)
+            )
+
+            await self.db.add_authorization(
+                target_id=tid,
+                id_type=id_type,
+                title=target_title,
+                added_by=interaction.user.id,
+            )
+            embed = discord.Embed(
+                title="✅ Successfully Authorized",
+                description=f"**Target ID:** `{tid}` ({id_type.capitalize()})\n**Title:** {target_title}",
+                color=0x2ECC71,
+            )
+            await interaction.response.send_message(embed=embed)
+
+        @self.bot.tree.command(
+            name="unauthorize",
+            description="Revoke authorization for a channel or user (Admin only)",
+        )
+        @app_commands.describe(
+            target_id="Channel ID or User ID to revoke (default: current channel)",
+        )
+        async def slash_unauthorize(
+            interaction: discord.Interaction,
+            target_id: Optional[str] = None,
+        ):
+            perms = getattr(interaction.user, "guild_permissions", None)
+            is_admin = perms and (perms.administrator or perms.manage_guild)
+            if not is_admin:
+                await interaction.response.send_message(
+                    "❌ **Permission Denied:** Administrator or Manage Server permission required.",
+                    ephemeral=True,
+                )
+                return
+
+            tid = (
+                int(target_id)
+                if target_id and target_id.lstrip("-").isdigit()
+                else interaction.channel_id
+            )
+            await self.db.remove_authorization(target_id=tid)
+            embed = discord.Embed(
+                title="🚫 Authorization Revoked",
+                description=f"**Target ID:** `{tid}` is no longer authorized.",
+                color=0xE74C3C,
+            )
+            await interaction.response.send_message(embed=embed)
+
+        @self.bot.tree.command(
+            name="authlist", description="View all authorized channels and users"
+        )
+        async def slash_authlist(interaction: discord.Interaction):
+            auths = await self.db.get_all_authorizations()
+            embed = discord.Embed(title="🛡️ Authorized Entities", color=0x3498DB)
+            if not auths:
+                embed.description = (
+                    "*No dynamic authorizations configured in database.*"
+                )
+            else:
+                desc_lines = []
+                for a in auths:
+                    tid = a.get("target_id")
+                    itype = a.get("id_type", "chat")
+                    name = a.get("title") or "N/A"
+                    desc_lines.append(f"• `{tid}` ({itype.capitalize()}) — {name}")
+                embed.description = "\n".join(desc_lines)
+            await interaction.response.send_message(embed=embed)
+
     def _setup_prefix_commands(self) -> None:
         """Register traditional prefix commands (!add, !list, etc.) for convenience."""
 
@@ -1328,6 +1426,62 @@ class DiscordBotService:
                 sample_item, "Sample RSS Feed (Preview)"
             )
             await ctx.send(embed=embed, view=view)
+
+        @self.bot.command(name="authorize", aliases=["a"])
+        async def prefix_authorize(ctx: commands.Context, target: Optional[str] = None):
+            perms = getattr(ctx.author, "guild_permissions", None)
+            if not perms or (not perms.administrator and not perms.manage_guild):
+                await ctx.send(
+                    "❌ **Permission Denied:** Administrator permission required."
+                )
+                return
+
+            tid = (
+                int(target)
+                if target and target.lstrip("-").isdigit()
+                else ctx.channel.id
+            )
+            title = (
+                ctx.channel.name
+                if not target and hasattr(ctx.channel, "name")
+                else str(tid)
+            )
+            await self.db.add_authorization(
+                target_id=tid, id_type="chat", title=title, added_by=ctx.author.id
+            )
+            await ctx.send(f"✅ **Authorized:** `{tid}` ({title})")
+
+        @self.bot.command(name="unauthorize", aliases=["ua"])
+        async def prefix_unauthorize(
+            ctx: commands.Context, target: Optional[str] = None
+        ):
+            perms = getattr(ctx.author, "guild_permissions", None)
+            if not perms or (not perms.administrator and not perms.manage_guild):
+                await ctx.send(
+                    "❌ **Permission Denied:** Administrator permission required."
+                )
+                return
+
+            tid = (
+                int(target)
+                if target and target.lstrip("-").isdigit()
+                else ctx.channel.id
+            )
+            await self.db.remove_authorization(target_id=tid)
+            await ctx.send(f"🚫 **Unauthorized:** `{tid}`")
+
+        @self.bot.command(name="authlist")
+        async def prefix_authlist(ctx: commands.Context):
+            auths = await self.db.get_all_authorizations()
+            if not auths:
+                await ctx.send("🛡️ No dynamic authorizations found in database.")
+                return
+            lines = ["🛡️ **Authorized Entities:**"]
+            for a in auths:
+                lines.append(
+                    f"• `{a.get('target_id')}` ({a.get('id_type', 'chat').capitalize()}) — {a.get('title', 'N/A')}"
+                )
+            await ctx.send("\n".join(lines))
 
     async def start(self) -> None:
         """Start the Discord bot client."""

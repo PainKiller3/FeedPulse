@@ -104,6 +104,12 @@ class Database:
             expireAfterSeconds=14 * 86400,
         )
 
+        # 5. Authorizations collection indexes
+        await self.db.authorizations.create_index(
+            [("target_id", ASCENDING), ("thread_id", ASCENDING)]
+        )
+        await self.db.authorizations.create_index([("id_type", ASCENDING)])
+
         logger.info("MongoDB collections and indexes initialized successfully")
 
     async def _get_next_sequence(self, name: str = "feed_id") -> int:
@@ -911,3 +917,58 @@ class Database:
             await self.db.alerted_media.insert_one(doc)
         except DuplicateKeyError:
             pass
+
+    # ---------------- Dynamic Authorization Management ----------------
+
+    async def add_authorization(
+        self,
+        target_id: int,
+        thread_id: Optional[int] = None,
+        id_type: str = "chat",
+        title: Optional[str] = None,
+        added_by: Optional[int] = None,
+    ) -> bool:
+        """
+        Add or update an authorized chat, user, or sudo user in MongoDB.
+        id_type: 'chat', 'user', or 'sudo'.
+        """
+        key = f"{target_id}|{thread_id}" if thread_id is not None else str(target_id)
+        doc = {
+            "target_id": target_id,
+            "thread_id": thread_id,
+            "id_type": id_type.lower(),
+            "title": title or "",
+            "added_by": added_by,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        res = await self.db.authorizations.update_one(
+            {"_id": key},
+            {"$set": doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        return res.upserted_id is not None or res.modified_count > 0
+
+    async def remove_authorization(
+        self,
+        target_id: int,
+        thread_id: Optional[int] = None,
+    ) -> bool:
+        """
+        Remove an authorized chat or user from MongoDB.
+        If thread_id is specified, only removes that topic entry.
+        Otherwise removes the chat and any topic entries associated with target_id.
+        """
+        if thread_id is not None:
+            key = f"{target_id}|{thread_id}"
+            res = await self.db.authorizations.delete_one({"_id": key})
+            return res.deleted_count > 0
+        else:
+            res = await self.db.authorizations.delete_many(
+                {"$or": [{"_id": str(target_id)}, {"target_id": target_id}]}
+            )
+            return res.deleted_count > 0
+
+    async def get_all_authorizations(self) -> List[Dict[str, Any]]:
+        """Retrieve all authorized entities stored in MongoDB."""
+        cursor = self.db.authorizations.find().sort("created_at", ASCENDING)
+        return await cursor.to_list(length=1000)
