@@ -218,20 +218,20 @@ class TelegramBotService:
             "Real-time RSS & BitTorrent notifications with file sizes, seeds, "
             "direct <code>.torrent</code> downloads, and 1-click Magnet links!\n\n"
             "<b>Available Commands:</b>\n"
-            "➕ <code>/add &lt;url&gt; [chat/channel] [topic_id]</code> - Subscribe to a feed\n"
-            "📋 <code>/list [chat/channel]</code> - View subscribed feeds\n"
-            "➖ <code>/remove &lt;id&gt; [chat/channel]</code> - Unsubscribe from a feed\n"
-            "🔍 <code>/filter &lt;id&gt; inc=&lt;words&gt; exc=&lt;words&gt;</code> - Keyword filters\n"
-            "🔄 <code>/check</code> - Force an immediate feed check\n"
-            "🧪 <code>/test [chat/channel]</code> - Preview sample torrent notification\n"
-            "🆔 <code>/id</code> - Display Chat ID, Topic ID, and your User ID\n\n"
+            "➕ /add &lt;url&gt; [chat/channel] [topic_id] — Subscribe to a feed\n"
+            "📋 /list [chat/channel] — View subscribed feeds\n"
+            "➖ /remove &lt;id&gt; [chat/channel] — Unsubscribe from a feed\n"
+            "🔍 /filter &lt;id&gt; inc=&lt;words&gt; exc=&lt;words&gt; — Keyword filters\n"
+            "🔄 /check — Force an immediate feed check\n"
+            "🧪 /test [chat/channel] — Preview sample torrent notification\n"
+            "🆔 /id — Display Chat ID, Topic ID, and your User ID\n\n"
             "<b>Examples:</b>\n"
             "• Subscribe current chat / topic:\n"
-            "  <code>/add https://example.com/rss/feed.xml</code>\n"
+            "  /add https://example.com/rss/feed.xml\n"
             "• Subscribe a channel from DM:\n"
-            "  <code>/add https://example.com/rss/feed.xml @MyChannel</code>\n"
+            "  /add https://example.com/rss/feed.xml @MyChannel\n"
             "• Subscribe a forum topic from DM:\n"
-            "  <code>/add https://example.com/rss/feed.xml -1001234567890 42</code>"
+            "  /add https://example.com/rss/feed.xml -1001234567890 42"
         )
         await update.effective_message.reply_html(text, disable_web_page_preview=True)
 
@@ -263,10 +263,10 @@ class TelegramBotService:
         if not context.args:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
-                "• <code>/add &lt;feed_url&gt;</code> (current chat/topic)\n"
-                "• <code>/add &lt;feed_url&gt; &lt;@channel_or_chat_id&gt; [topic_id]</code>\n\n"
+                "• /add &lt;feed_url&gt; (current chat/topic)\n"
+                "• /add &lt;feed_url&gt; &lt;@channel_or_chat_id&gt; [topic_id]\n\n"
                 "<b>Example:</b>\n"
-                "<code>/add https://example.com/rss/feed.xml @MyChannel</code>"
+                "/add https://example.com/rss/feed.xml @MyChannel"
             )
             return
 
@@ -370,7 +370,7 @@ class TelegramBotService:
         if not subs:
             await update.effective_message.reply_html(
                 f"📭 <b>No active subscriptions for {dest_label}.</b>\n\n"
-                "Use <code>/add &lt;feed_url&gt;</code> to start monitoring a feed!"
+                "Use /add &lt;feed_url&gt; to start monitoring a feed!"
             )
             return
 
@@ -393,7 +393,7 @@ class TelegramBotService:
                 lines.append(f"  🚫 <i>Exclude: {html.escape(s['filter_exclude'])}</i>")
             lines.append(f"  ⏱ <i>Last Check: {checked}</i>\n")
 
-        lines.append("<i>To remove a feed, use:</i> <code>/remove &lt;id&gt;</code>")
+        lines.append("<i>To remove a feed, use:</i> /remove &lt;id&gt;")
         await update.effective_message.reply_html(
             "\n".join(lines), disable_web_page_preview=True
         )
@@ -408,9 +408,9 @@ class TelegramBotService:
         if not context.args:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
-                "• <code>/remove &lt;feed_id_or_url&gt;</code> (current chat/topic)\n"
-                "• <code>/remove &lt;feed_id_or_url&gt; &lt;@channel_or_chat_id&gt;</code>\n\n"
-                "Check your feeds with <code>/list</code> first."
+                "• /remove &lt;feed_id_or_url&gt; (current chat/topic)\n"
+                "• /remove &lt;feed_id_or_url&gt; &lt;@channel_or_chat_id&gt;\n\n"
+                "Check your feeds with /list first."
             )
             return
 
@@ -439,7 +439,7 @@ class TelegramBotService:
         else:
             await update.effective_message.reply_html(
                 f"❌ Subscription not found for <code>{html.escape(feed_identifier)}</code> in {dest_str}.\n"
-                "Use <code>/list</code> to see your active feed IDs."
+                "Use /list to see your active feed IDs."
             )
 
     async def cmd_filter(
@@ -455,17 +455,17 @@ class TelegramBotService:
         if not context.args or len(context.args) < 2:
             await update.effective_message.reply_html(
                 "⚠️ <b>Usage:</b>\n"
-                "<code>/filter &lt;feed_id&gt; inc=&lt;words&gt; exc=&lt;words&gt; [@channel]</code>\n\n"
+                "/filter &lt;feed_id&gt; inc=&lt;words&gt; exc=&lt;words&gt; [@channel]\n\n"
                 "<b>Example:</b>\n"
-                "<code>/filter 1 inc=1080p,flac exc=cam,hindi</code>\n"
-                "<i>To clear filters:</i> <code>/filter 1 clear</code>"
+                "/filter 1 inc=1080p,flac exc=cam,hindi\n"
+                "<i>To clear filters:</i> /filter 1 clear"
             )
             return
 
         feed_id_str = context.args[0].strip()
         if not feed_id_str.isdigit():
             await update.effective_message.reply_html(
-                "❌ Please provide a numeric feed ID (e.g. <code>/filter 1 ...</code>)."
+                "❌ Please provide a numeric feed ID (e.g. /filter 1 ...)."
             )
             return
 
