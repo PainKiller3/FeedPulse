@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  feedpulse:
+    build: .
+    container_name: feedpulse-bot
+    restart: unless-stopped
+    volumes:
+      # Mount configuration file
+      - ./config.py:/app/config.py
+      # Persist SQLite database across container restarts
+      - ./data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/feedpulse.db
