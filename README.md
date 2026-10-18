@@ -206,12 +206,19 @@ Run FeedPulse in the background with automatic restart using Docker Compose:
 
 ```bash
 # 1. Configure config.py with your tokens
-# 2. Start container
-docker-compose up -d
+cp config_sample.py config.py
 
-# Check logs
-docker-compose logs -f
+# 2. Build and start container in the background
+docker compose up -d --build
+
+# 3. View live logs
+docker compose logs -f
+
+# To stop the bot
+docker compose down
 ```
+
+> **Note:** If your system uses legacy Docker Compose v1, use `docker-compose` instead of `docker compose`.
 
 ---
 
