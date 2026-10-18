@@ -2505,6 +2505,31 @@ class TelegramBotService:
                         "⚠️ <b>Invalid Format!</b> Use <code>/authorize &lt;chat_id&gt;|&lt;thread_id&gt;</code>"
                     )
                     return
+            elif arg.startswith("@"):
+                try:
+                    target_chat = await context.bot.get_chat(arg)
+                    target_id = target_chat.id
+                    if (
+                        id_type != "sudo"
+                        and "-user" not in flags
+                        and "-chat" not in flags
+                    ):
+                        id_type = "user" if target_chat.type == "private" else "chat"
+                    title = (
+                        target_chat.title
+                        or target_chat.full_name
+                        or f"@{target_chat.username}"
+                        or str(target_id)
+                    )
+                except Exception as e:
+                    await update.effective_message.reply_html(
+                        f"⚠️ <b>Cannot resolve username <code>{html.escape(arg)}</code>:</b> {html.escape(str(e))}\n\n"
+                        "💡 <b>Telegram Restriction:</b> Telegram prevents bots from looking up users by <code>@username</code> if they haven't interacted with the bot.\n\n"
+                        "<b>Recommended Solutions:</b>\n"
+                        "• <b>Reply:</b> Simply reply to any message from that user with <code>/authorize</code>.\n"
+                        "• <b>User ID:</b> Ask them to type <code>/id</code>, then use <code>/authorize &lt;user_id&gt;</code>."
+                    )
+                    return
             else:
                 try:
                     target_id = int(arg)
@@ -2514,13 +2539,12 @@ class TelegramBotService:
                         and "-chat" not in flags
                     ):
                         id_type = "chat" if target_id < 0 else "user"
+                    title = f"{'Chat' if id_type == 'chat' else 'User'} {target_id}"
                 except ValueError:
                     await update.effective_message.reply_html(
-                        "⚠️ <b>Invalid ID!</b> Please provide a numeric Chat ID or User ID."
+                        "⚠️ <b>Invalid ID!</b> Please provide a numeric Chat ID, User ID, or @username."
                     )
                     return
-
-            title = f"{'Chat' if id_type == 'chat' else 'User'} {target_id}"
 
         elif reply and reply.from_user:
             target_id = reply.from_user.id
@@ -2624,12 +2648,22 @@ class TelegramBotService:
                         "⚠️ <b>Invalid Format!</b> Use <code>/unauthorize &lt;chat_id&gt;|&lt;thread_id&gt;</code>"
                     )
                     return
+            elif arg.startswith("@"):
+                try:
+                    target_chat = await context.bot.get_chat(arg)
+                    target_id = target_chat.id
+                except Exception as e:
+                    await update.effective_message.reply_html(
+                        f"⚠️ <b>Cannot resolve username <code>{html.escape(arg)}</code>:</b> {html.escape(str(e))}\n\n"
+                        "💡 <b>Tip:</b> Reply to their message with <code>/unauthorize</code> or use their numeric ID."
+                    )
+                    return
             else:
                 try:
                     target_id = int(arg)
                 except ValueError:
                     await update.effective_message.reply_html(
-                        "⚠️ <b>Invalid ID!</b> Please provide a numeric Chat ID or User ID."
+                        "⚠️ <b>Invalid ID!</b> Please provide a numeric Chat ID, User ID, or @username."
                     )
                     return
         elif reply and reply.from_user:
