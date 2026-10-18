@@ -262,34 +262,38 @@ class TelegramBotService:
             return False
 
         # In groups/channels: verify chat authorization if whitelist is configured
-        if self.authorized_chats and chat_id not in self.authorized_chats:
-            logger.warning(
-                "Unauthorized command attempt in chat %s (%s) by user %s",
-                chat_id,
-                chat.title if chat else "",
-                user_id,
-            )
-            return False
-
-        # If specific topics in this chat are restricted
-        if chat_id in self.authorized_threads and self.authorized_threads[chat_id]:
-            msg = update.effective_message
-            is_topic = getattr(msg, "is_topic_message", False)
-            thread_id = msg.message_thread_id if is_topic else None
-            if thread_id and thread_id not in self.authorized_threads[chat_id]:
+        if self.authorized_chats:
+            if chat_id not in self.authorized_chats:
                 logger.warning(
-                    "Unauthorized topic attempt in chat %s topic %s by user %s",
+                    "Unauthorized command attempt in chat %s (%s) by user %s",
                     chat_id,
-                    thread_id,
+                    chat.title if chat else "",
                     user_id,
                 )
                 return False
+
+            # If specific topics in this chat are restricted
+            if chat_id in self.authorized_threads and self.authorized_threads[chat_id]:
+                msg = update.effective_message
+                is_topic = getattr(msg, "is_topic_message", False)
+                thread_id = msg.message_thread_id if is_topic else None
+                if thread_id and thread_id not in self.authorized_threads[chat_id]:
+                    logger.warning(
+                        "Unauthorized topic attempt in chat %s topic %s by user %s",
+                        chat_id,
+                        thread_id,
+                        user_id,
+                    )
+                    return False
+
+            # Chat is explicitly authorized: all members in this chat can use the bot
+            return True
 
         # If user is explicitly in authorized_users list
         if user_id in self.authorized_users:
             return True
 
-        # If in an authorized group, check if user is group Administrator or Creator
+        # If in an unlisted group and only user whitelist is active, allow group admins
         if chat and chat.type in ("group", "supergroup"):
             try:
                 member = await chat.get_member(user_id)
@@ -299,7 +303,7 @@ class TelegramBotService:
                 logger.debug("Failed to verify group admin status: %s", e)
 
         await update.effective_message.reply_html(
-            "⛔ <b>Permission Denied:</b> Only the Bot Owner, Sudo Users, or Group Admins can manage feeds."
+            "⛔ <b>Permission Denied:</b> You are not authorized to manage feeds."
         )
         return False
 
