@@ -49,6 +49,7 @@ class TelegramBotService:
         self.authorized_threads: Dict[int, Set[int]] = {}
         self.sudo_users: Set[int] = set(sudo_users or [])
         self.authorized_users: Set[int] = set()
+        self._dm_member_cache: Set[int] = set()
         self.max_feeds_per_user: int = max_feeds_per_user
         self.application: Optional[Application] = None
 
@@ -250,14 +251,38 @@ class TelegramBotService:
         if (self.owner_id and user_id == self.owner_id) or (user_id in self.sudo_users):
             return True
 
-        # In private DM: allowed if user is in authorized_users or authorized_chats
+        # In private DM: allowed if user is in authorized_users/chats, or is an active member of any authorized group
         if chat and chat.type == "private":
-            if user_id in self.authorized_users or user_id in self.authorized_chats:
+            if (
+                user_id in self.authorized_users
+                or user_id in self.authorized_chats
+                or user_id in self._dm_member_cache
+            ):
                 return True
+
+            # If user is a verified member of any configured authorized group, grant access
+            if self.authorized_chats:
+                for auth_chat_id in self.authorized_chats:
+                    if auth_chat_id < 0:  # Only check group / supergroup chat IDs
+                        try:
+                            member = await context.bot.get_chat_member(
+                                auth_chat_id, user_id
+                            )
+                            if member and member.status in (
+                                "creator",
+                                "administrator",
+                                "member",
+                                "restricted",
+                            ):
+                                self._dm_member_cache.add(user_id)
+                                return True
+                        except Exception:
+                            continue
+
             await update.effective_message.reply_html(
                 f"⛔ <b>Access Denied:</b> You are not authorized to control this bot.\n\n"
                 f"👤 <b>Your User ID:</b> <code>{user_id}</code>\n"
-                "Ask the Bot Owner to authorize you via <code>/authorize</code>."
+                "Ask the Bot Owner to authorize you via <code>/authorize</code> or join an authorized group."
             )
             return False
 
