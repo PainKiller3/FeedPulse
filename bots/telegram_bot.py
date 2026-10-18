@@ -2158,33 +2158,23 @@ class TelegramBotService:
             return
 
         action = parts[1]
-        if action == "toggle" and len(parts) > 3 and parts[2] == "rt":
-            creator_id = int(parts[3]) if parts[3].isdigit() else 0
-        else:
-            creator_id = int(parts[2]) if parts[2].isdigit() else 0
+        creator_id = int(parts[-1]) if parts[-1].isdigit() else 0
         user = update.effective_user
-        user_id = user.id if user else 0
+        caller_id = query.from_user.id if query.from_user else (user.id if user else 0)
+        user_id = caller_id
         chat = update.effective_chat
         chat_id = chat.id if chat else 0
         chat_title = chat.title or (
             f"@{chat.username}" if chat.username else f"Chat {chat_id}"
         )
 
-        # Access check: Only creator, sudo, owner or group admin can click
-        if user_id != creator_id and not self.is_super_user(user_id):
-            is_admin = False
-            if chat and chat.type in ("group", "supergroup"):
-                try:
-                    member = await chat.get_member(user_id)
-                    is_admin = member.status in ("creator", "administrator")
-                except Exception:
-                    pass
-            if not is_admin:
-                await query.answer(
-                    "⛔ This menu belongs to another user. Type /rss to open your own!",
-                    show_alert=True,
-                )
-                return
+        # Strict access check: Only the user who opened this menu (or Bot Owner / Sudo) can interact
+        if caller_id != creator_id and not self.is_super_user(caller_id):
+            await query.answer(
+                "⚠️ Not Yours! Type /menu to open your own Control Center.",
+                show_alert=True,
+            )
+            return
 
         back_button = [
             [
@@ -2196,10 +2186,24 @@ class TelegramBotService:
 
         if action == "close":
             await query.answer("Menu closed.")
+            # Delete user's triggering /menu command message if available
+            if query.message and query.message.reply_to_message:
+                try:
+                    await query.message.reply_to_message.delete()
+                except Exception:
+                    pass
+
+            # Delete the menu panel itself
             try:
                 await query.message.delete()
             except Exception:
-                pass
+                try:
+                    await query.edit_message_text(
+                        "❌ <i>Control Center closed.</i>",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
             return
 
         elif action == "main":
