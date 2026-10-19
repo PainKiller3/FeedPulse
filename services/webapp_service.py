@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp import web
 
 from database.db import Database
-from parser.feed_parser import FeedParser
+from parser.feed_parser import FeedParser, format_bytes
 from services.dispatcher import NotificationDispatcher
 from services.poller import FeedPoller
 
@@ -308,7 +308,7 @@ class WebAppServer:
             logger.warning("Feed validation warning for %s: %s", url, e)
 
         try:
-            feed_id, is_new = await self.db.subscribe(
+            feed_id, feed_title, is_new = await self.db.subscribe(
                 platform="telegram",
                 target_id=target_id,
                 url=url,
@@ -328,7 +328,7 @@ class WebAppServer:
                 {
                     "success": True,
                     "feed_id": feed_id,
-                    "title": title or url,
+                    "title": feed_title or title or url,
                     "is_new": is_new,
                     "message": "Feed subscribed successfully!",
                 }
@@ -339,7 +339,7 @@ class WebAppServer:
 
     async def handle_api_pause_feed(self, request: web.Request) -> web.Response:
         """Pause or resume a feed."""
-        feed_id = request.match_info.get("feed_id")
+        feed_id = request.match_info.get("feed_id", "")
         user = await self.get_request_user(request)
         uid = user["id"]
         is_admin = user["is_super"]
@@ -347,65 +347,96 @@ class WebAppServer:
         try:
             data = await request.json()
             is_paused = bool(data.get("paused", True))
+            target_id = data.get("target_id")
         except Exception:
             is_paused = True
+            target_id = None
+
+        if not target_id:
+            target_id = request.query.get("target_id")
+
+        if not target_id and feed_id.isdigit():
+            # Auto-resolve target_id from user's active subscription
+            sub_doc = await self.db.subscriptions.find_one(
+                {"feed_id": int(feed_id), "user_id": uid}
+            )
+            if sub_doc:
+                target_id = str(sub_doc.get("target_id") or "")
+        if not target_id:
+            target_id = str(uid)
 
         try:
-            success, target_id, title = await self.db.set_subscription_pause(
+            feed_label, status_code, count = await self.db.set_subscription_pause(
                 platform="telegram",
+                target_id=str(target_id),
                 feed_identifier=feed_id,
-                is_paused=is_paused,
+                paused=is_paused,
                 user_id=uid,
                 is_admin=is_admin,
             )
-            if success:
+            if status_code in ("success", "already_paused", "already_resumed"):
                 return safe_json_response(
                     {
                         "success": True,
                         "feed_id": feed_id,
                         "is_paused": is_paused,
-                        "title": title,
+                        "title": feed_label or feed_id,
+                        "affected": count,
                     }
                 )
             return safe_json_response(
-                {"error": "Feed not found or permission denied"}, status=404
+                {"error": status_code or "Feed not found or permission denied"},
+                status=404 if status_code == "not_found" else 403,
             )
         except Exception as e:
+            logger.error("Error pausing feed %s via WebApp: %s", feed_id, e)
             return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_delete_feed(self, request: web.Request) -> web.Response:
         """Unsubscribe from a feed."""
-        feed_id = request.match_info.get("feed_id")
+        feed_id = request.match_info.get("feed_id", "")
         user = await self.get_request_user(request)
         uid = user["id"]
         is_admin = user["is_super"]
         target_id = request.query.get("target_id")
 
+        if not target_id and feed_id.isdigit():
+            # Auto-resolve target_id from user's active subscription
+            sub_doc = await self.db.subscriptions.find_one(
+                {"feed_id": int(feed_id), "user_id": uid}
+            )
+            if sub_doc:
+                target_id = str(sub_doc.get("target_id") or "")
+        if not target_id:
+            target_id = str(uid)
+
         try:
-            success, title = await self.db.unsubscribe(
+            feed_label, status_code = await self.db.unsubscribe(
                 platform="telegram",
-                target_id=str(target_id) if target_id else "",
+                target_id=str(target_id),
                 feed_identifier=feed_id,
                 user_id=uid,
                 is_admin=is_admin,
             )
-            if success:
+            if status_code == "success":
                 return safe_json_response(
                     {
                         "success": True,
                         "feed_id": feed_id,
-                        "message": f"Successfully unsubscribed from {title or feed_id}",
+                        "message": f"Successfully unsubscribed from {feed_label or feed_id}",
                     }
                 )
             return safe_json_response(
-                {"error": "Feed not found or permission denied"}, status=404
+                {"error": status_code or "Feed not found or permission denied"},
+                status=404 if status_code == "not_found" else 403,
             )
         except Exception as e:
+            logger.error("Error deleting feed %s via WebApp: %s", feed_id, e)
             return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_edit_feed(self, request: web.Request) -> web.Response:
         """Edit feed title, filters, or URL in-place."""
-        feed_id = request.match_info.get("feed_id")
+        feed_id = request.match_info.get("feed_id", "")
         user = await self.get_request_user(request)
         uid = user["id"]
         is_admin = user["is_super"]
@@ -422,7 +453,17 @@ class WebAppServer:
         case_sensitive = data.get("case_sensitive")
         max_size = data.get("max_size")
         min_size = data.get("min_size")
-        target_id = str(data.get("target_id") or uid)
+        target_id = str(data.get("target_id") or "")
+
+        if not target_id and feed_id.isdigit():
+            # Auto-resolve target_id from user's active subscription
+            sub_doc = await self.db.subscriptions.find_one(
+                {"feed_id": int(feed_id), "user_id": uid}
+            )
+            if sub_doc:
+                target_id = str(sub_doc.get("target_id") or "")
+        if not target_id:
+            target_id = str(uid)
 
         try:
             feed_label, status, changed = await self.db.edit_subscription(
@@ -439,12 +480,20 @@ class WebAppServer:
                 user_id=uid,
                 is_admin=is_admin,
             )
-            if status == "success":
+            if status in ("success", "no_changes"):
                 return safe_json_response(
-                    {"success": True, "feed_id": feed_id, "changed": changed}
+                    {
+                        "success": True,
+                        "feed_id": feed_id,
+                        "title": feed_label,
+                        "changed": changed,
+                    }
                 )
-            return safe_json_response({"error": status}, status=400)
+            return safe_json_response(
+                {"error": status}, status=404 if status == "not_found" else 400
+            )
         except Exception as e:
+            logger.error("Error editing feed %s via WebApp: %s", feed_id, e)
             return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_inspect_feed(self, request: web.Request) -> web.Response:
@@ -473,7 +522,9 @@ class WebAppServer:
                         "title": item.title,
                         "link": item.link,
                         "published": item.published,
-                        "file_size": item.file_size,
+                        "file_size": item.size_str
+                        or (format_bytes(item.size_bytes) if item.size_bytes else None),
+                        "size_bytes": item.size_bytes,
                         "seeds": item.seeds,
                         "leechers": item.leechers,
                         "category": item.category,

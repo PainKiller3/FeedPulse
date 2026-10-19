@@ -436,7 +436,7 @@ const App = (function () {
     });
 
     card.querySelector('.btn-pause').addEventListener('click', () => {
-      toggleFeedPause(fid, !isPaused);
+      toggleFeedPause(fid, !isPaused, target);
     });
 
     card.querySelector('.btn-edit').addEventListener('click', () => {
@@ -452,14 +452,14 @@ const App = (function () {
 
   // ---------------- Actions ----------------
 
-  async function toggleFeedPause(feedId, setPaused) {
+  async function toggleFeedPause(feedId, setPaused, targetId) {
     TelegramBridge.hapticImpact('medium');
     try {
       const res = await fetch(`/api/feeds/${feedId}/pause`, {
         method: 'POST',
         credentials: 'omit',
         headers: TelegramBridge.getAuthHeaders(),
-        body: JSON.stringify({ paused: setPaused }),
+        body: JSON.stringify({ paused: setPaused, target_id: targetId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to update feed');
@@ -644,7 +644,7 @@ const App = (function () {
         const itemCard = document.createElement('div');
         itemCard.className = 'inspect-item-card';
 
-        const sizeLabel = item.file_size ? formatBytes(item.file_size) : null;
+        const sizeLabel = item.file_size ? formatBytes(item.file_size) : (item.size_bytes ? formatBytes(item.size_bytes) : null);
         const hasSeeds = item.seeds !== null && item.seeds !== undefined && item.seeds !== '?';
 
         itemCard.innerHTML = `
@@ -826,7 +826,12 @@ const App = (function () {
   }
 
   function formatBytes(bytes) {
-    if (!bytes || bytes <= 0) return '0 B';
+    if (!bytes) return null;
+    if (typeof bytes === 'string') {
+      if (isNaN(Number(bytes))) return bytes;
+      bytes = Number(bytes);
+    }
+    if (bytes <= 0) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(1024));
     return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + units[i];

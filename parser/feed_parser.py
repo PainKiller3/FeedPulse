@@ -94,6 +94,13 @@ class FeedItem:
     canonical_media_key: Optional[str] = None
 
     @property
+    def file_size(self) -> Optional[str]:
+        """Return human-readable size string or formatted size_bytes."""
+        return self.size_str or (
+            format_bytes(self.size_bytes) if self.size_bytes else None
+        )
+
+    @property
     def is_torrent(self) -> bool:
         """Return True if this item has torrent characteristics."""
         return bool(
