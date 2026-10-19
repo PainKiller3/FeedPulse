@@ -9,6 +9,7 @@ from services.dispatcher import NotificationDispatcher
 from services.poller import FeedPoller
 from bots.telegram_bot import TelegramBotService
 from bots.discord_bot import DiscordBotService
+from services.webapp_service import WebAppServer
 
 try:
     import config
@@ -27,6 +28,19 @@ DISCORD_BOT_TOKEN = (
 POLL_INTERVAL_SECONDS = int(
     os.environ.get("POLL_INTERVAL_SECONDS")
     or getattr(config, "POLL_INTERVAL_SECONDS", 120)
+)
+WEBAPP_URL = os.environ.get("WEBAPP_URL") or getattr(config, "WEBAPP_URL", "").strip()
+WEBAPP_PORT = int(
+    os.environ.get("PORT")
+    or os.environ.get("WEBAPP_PORT")
+    or getattr(config, "WEBAPP_PORT", 8080)
+    or 8080
+)
+WEBAPP_HOST = os.environ.get("WEBAPP_HOST") or getattr(config, "WEBAPP_HOST", "0.0.0.0")
+ENABLE_WEBAPP = (
+    os.environ.get("ENABLE_WEBAPP", "").lower() in ("true", "1", "yes")
+    if "ENABLE_WEBAPP" in os.environ
+    else bool(getattr(config, "ENABLE_WEBAPP", True))
 )
 
 
@@ -158,6 +172,7 @@ async def main() -> None:
             authorized_chats=AUTHORIZED_CHATS,
             sudo_users=SUDO_USERS,
             max_feeds_per_user=MAX_FEEDS_PER_USER,
+            webapp_url=WEBAPP_URL,
         )
     else:
         logger.info("Telegram Bot is disabled (BOT_TOKEN not provided).")
@@ -171,7 +186,30 @@ async def main() -> None:
     # 5. Start Background Poller
     await poller.start()
 
-    # 6. Start bot services
+    # 6. Start WebApp Server
+    webapp_server = None
+    if ENABLE_WEBAPP:
+        logger.info(
+            "Initializing FeedPulse WebApp Server on %s:%d...",
+            WEBAPP_HOST,
+            WEBAPP_PORT,
+        )
+        webapp_server = WebAppServer(
+            db=db,
+            poller=poller,
+            dispatcher=dispatcher,
+            bot_token=BOT_TOKEN,
+            owner_id=OWNER_ID,
+            authorized_chats=AUTHORIZED_CHATS,
+            sudo_users=SUDO_USERS,
+            host=WEBAPP_HOST,
+            port=WEBAPP_PORT,
+            webapp_url=WEBAPP_URL,
+            telegram_bot_service=telegram_service,
+        )
+        await webapp_server.start()
+
+    # 7. Start bot services
     discord_task = None
     if telegram_service:
         await telegram_service.start()
@@ -213,6 +251,8 @@ async def main() -> None:
         pass
     finally:
         logger.info("Shutting down FeedPulse gracefully...")
+        if webapp_server:
+            await webapp_server.stop()
         await poller.stop()
         if telegram_service:
             await telegram_service.stop()

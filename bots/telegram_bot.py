@@ -4,7 +4,14 @@ import logging
 import shlex
 from typing import Optional, List, Set, Tuple, Dict
 import aiohttp
-from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonWebApp,
+    Update,
+    WebAppInfo,
+)
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -39,6 +46,7 @@ class TelegramBotService:
         authorized_chats: Optional[List[int]] = None,
         sudo_users: Optional[List[int]] = None,
         max_feeds_per_user: int = 25,
+        webapp_url: str = "",
     ):
         self.token = token
         self.db = db
@@ -51,6 +59,7 @@ class TelegramBotService:
         self.authorized_users: Set[int] = set()
         self._dm_member_cache: Set[int] = set()
         self.max_feeds_per_user: int = max_feeds_per_user
+        self.webapp_url: str = webapp_url.rstrip("/") if webapp_url else ""
         self.application: Optional[Application] = None
 
     def is_super_user(self, user_id: int) -> bool:
@@ -168,6 +177,9 @@ class TelegramBotService:
         self.application.add_handler(CommandHandler("check", self.cmd_check))
         self.application.add_handler(CommandHandler("test", self.cmd_test))
         self.application.add_handler(
+            CommandHandler(["webapp", "app", "dashboard"], self.cmd_webapp)
+        )
+        self.application.add_handler(
             CallbackQueryHandler(self.handle_menu_callback, pattern="^rss_")
         )
 
@@ -188,6 +200,7 @@ class TelegramBotService:
 
         # Automatically register command autocompletion menu with Telegram
         commands = [
+            BotCommand("webapp", "Open FeedPulse Web App Dashboard"),
             BotCommand("menu", "Open interactive Control Center"),
             BotCommand("add", "Subscribe to an RSS/torrent feed"),
             BotCommand("list", "View active feed subscriptions"),
@@ -212,6 +225,22 @@ class TelegramBotService:
             logger.info("Bot commands successfully registered with Telegram Menu")
         except Exception as e:
             logger.warning("Could not register bot commands in Telegram: %s", e)
+
+        # Configure native Telegram Chat Menu Button if WebApp URL is configured
+        if self.webapp_url:
+            try:
+                await self.application.bot.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(
+                        text="FeedPulse",
+                        web_app=WebAppInfo(url=self.webapp_url),
+                    )
+                )
+                logger.info(
+                    "Configured Telegram Chat Menu button for WebApp: %s",
+                    self.webapp_url,
+                )
+            except Exception as e:
+                logger.warning("Could not set Telegram Chat Menu button: %s", e)
 
     async def stop(self) -> None:
         """Gracefully stop the Telegram bot."""
@@ -450,19 +479,69 @@ class TelegramBotService:
         )
         user = update.effective_user
         user_id = user.id if user else 0
-        reply_markup = InlineKeyboardMarkup(
+        buttons = [
             [
+                InlineKeyboardButton(
+                    "🎛️ Open Control Center",
+                    callback_data=f"rss_main_{user_id}",
+                )
+            ]
+        ]
+        if self.webapp_url:
+            buttons.insert(
+                0,
                 [
                     InlineKeyboardButton(
-                        "🎛️ Open Control Center",
-                        callback_data=f"rss_main_{user_id}",
+                        "🚀 Launch Web App",
+                        web_app=WebAppInfo(url=self.webapp_url),
                     )
-                ]
-            ]
-        )
+                ],
+            )
+        reply_markup = InlineKeyboardMarkup(buttons)
         await update.effective_message.reply_html(
             text, reply_markup=reply_markup, disable_web_page_preview=True
         )
+
+    async def cmd_webapp(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Open the FeedPulse Telegram Mini App Dashboard."""
+        if not await self.check_authorization(update, context):
+            return
+
+        if self.webapp_url:
+            text = (
+                "⚡ <b>FeedPulse Web App Control Center</b>\n\n"
+                "Manage your feeds with a state-of-the-art interactive web dashboard directly inside Telegram:\n\n"
+                "• 📋 <b>Visual Feed Manager:</b> Search, filter, and inspect subscriptions\n"
+                "• ➕ <b>Interactive Wizard:</b> Form-based feed creation with keyword tags\n"
+                "• 🔍 <b>Live Torrent Inspector:</b> Live preview, seeds, file sizes, and 1-click magnet links\n"
+                "• ⚙️ <b>Instant Actions:</b> One-click pause, resume, and instant polling cycles\n\n"
+                "<i>Tap the button below to launch:</i>"
+            )
+            reply_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🚀 Launch Control Center",
+                            web_app=WebAppInfo(url=self.webapp_url),
+                        )
+                    ]
+                ]
+            )
+            await update.effective_message.reply_html(
+                text, reply_markup=reply_markup, disable_web_page_preview=True
+            )
+        else:
+            text = (
+                "⚡ <b>FeedPulse Web App</b>\n\n"
+                "The embedded Web App server is active, but <code>WEBAPP_URL</code> is not configured yet!\n\n"
+                "<b>To activate the Telegram Mini App button:</b>\n"
+                "1. Provide a public HTTPS URL (e.g. from Render, Railway, or free Cloudflare Tunnel / ngrok).\n"
+                '2. Set <code>WEBAPP_URL = "https://your-domain.com"</code> in <code>config.py</code> or environment variable.\n'
+                "3. Restart the bot!"
+            )
+            await update.effective_message.reply_html(text)
 
     async def cmd_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Display Telegram User ID, Chat ID, and Topic / Thread ID."""
@@ -2111,45 +2190,60 @@ class TelegramBotService:
         is_rt = self.dispatcher.is_rich_text_enabled(str(chat_id))
         rt_btn_text = "🎨 Rich Text: ON 🟢" if is_rt else "🎨 Rich Text: OFF ⚪"
 
-        keyboard = [
+        keyboard = []
+        if self.webapp_url:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        "🚀 Open Web App Dashboard",
+                        web_app=WebAppInfo(url=self.webapp_url),
+                    )
+                ]
+            )
+
+        keyboard.extend(
             [
-                InlineKeyboardButton(
-                    f"📋 Chat Feeds ({len(chat_subs)})",
-                    callback_data=f"rss_list_{user_id}",
-                ),
-                InlineKeyboardButton(
-                    f"👤 My Feeds ({len(user_subs)})",
-                    callback_data=f"rss_myfeeds_{user_id}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "⏸️ Pause All", callback_data=f"rss_pauseall_{user_id}"
-                ),
-                InlineKeyboardButton(
-                    "▶️ Resume All", callback_data=f"rss_resumeall_{user_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    rt_btn_text, callback_data=f"rss_toggle_rt_{user_id}"
-                ),
-                InlineKeyboardButton(
-                    "🔄 Check Now", callback_data=f"rss_check_{user_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🧪 Test Alert", callback_data=f"rss_test_{user_id}"
-                ),
-                InlineKeyboardButton(
-                    "ℹ️ Help & Guide", callback_data=f"rss_help_{user_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton("❌ Close", callback_data=f"rss_close_{user_id}"),
-            ],
-        ]
+                [
+                    InlineKeyboardButton(
+                        f"📋 Chat Feeds ({len(chat_subs)})",
+                        callback_data=f"rss_list_{user_id}",
+                    ),
+                    InlineKeyboardButton(
+                        f"👤 My Feeds ({len(user_subs)})",
+                        callback_data=f"rss_myfeeds_{user_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⏸️ Pause All", callback_data=f"rss_pauseall_{user_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "▶️ Resume All", callback_data=f"rss_resumeall_{user_id}"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        rt_btn_text, callback_data=f"rss_toggle_rt_{user_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "🔄 Check Now", callback_data=f"rss_check_{user_id}"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🧪 Test Alert", callback_data=f"rss_test_{user_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "ℹ️ Help & Guide", callback_data=f"rss_help_{user_id}"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Close", callback_data=f"rss_close_{user_id}"
+                    ),
+                ],
+            ]
+        )
         return text, InlineKeyboardMarkup(keyboard)
 
     async def cmd_rss_menu(

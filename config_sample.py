@@ -29,6 +29,16 @@ USER_AGENT = (
 )
 
 # ==============================================================================
+# TELEGRAM MINI APP & WEB SERVER CONFIG
+# ==============================================================================
+ENABLE_WEBAPP = True  # Enable embedded Web App & REST API server
+WEBAPP_PORT = 8080  # Port for the embedded Web App server (default: 8080 or PORT env)
+WEBAPP_HOST = "0.0.0.0"  # Interface to bind to
+WEBAPP_URL = ""  # Public HTTPS URL of the Web App (e.g. "https://feedpulse.yourdomain.com", Render URL, or Cloudflare Tunnel)
+# Note: Telegram requires an HTTPS URL to launch Mini Apps inside the Telegram client.
+# Once set, users can open the dashboard via /webapp or the Telegram Chat Menu button.
+
+# ==============================================================================
 # NOTIFICATION TEMPLATES & RICH TEXT
 # ==============================================================================
 # Enable Telegram rich text (expandable blockquotes for long magnets, sleek metadata cards).

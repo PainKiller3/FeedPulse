@@ -6,6 +6,7 @@
 
 ## ✨ Features
 
+- 📱 **Telegram Mini App (Web App)**: Modern, responsive glassmorphism dashboard running directly inside Telegram (iOS, Android, Desktop) for visual feed management, form-based subscriptions with keyword tag chips, and live torrent preview.
 - 🌊 **BitTorrent Enriched**: Automatically detects torrent feeds, extracts infohashes, seeders, leechers, file size, and generates instant `magnet:?xt=urn:btih:...` links with public trackers.
 - 🌐 **Universal Feed Support (RSS, Atom, JSON Feed & TorAPI)**: In addition to standard RSS and Atom XML, natively monitors JSON feeds including TorAPI endpoints, JSON Feed v1/v1.1, and Jackett / Prowlarr API search results.
 - 🤖 **Dual-Platform (Telegram & Discord)**: Run Telegram, Discord, or both simultaneously from a single process.
@@ -24,6 +25,7 @@ Both **Telegram** and **Discord** (slash commands + prefix `!`) support the exac
 | Command | Description | Example |
 | :--- | :--- | :--- |
 | `/start` or `/help` | Displays help message and quick-start guide | `/help` |
+| `/webapp` or `/app` | Launch the Telegram Mini App Web Dashboard | `/webapp` |
 | `/menu` | Open interactive button Control Center (Telegram) | `/menu` |
 | `/add <url>` | Subscribe current chat/channel to an RSS feed | `/add https://example.com/rss/feed.xml` |
 | `/list` | List all feeds monitored in this chat/channel | `/list` |

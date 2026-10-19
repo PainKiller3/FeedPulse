@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>FeedPulse - Realtime RSS & Torrent Control Center</title>
+  <meta name="description" content="Powerful, real-time RSS & BitTorrent monitoring dashboard for Telegram Mini Apps.">
+
+  <!-- Telegram Web App SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <!-- Google Fonts: Outfit & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Ambient background glow elements -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+  <div class="ambient-glow glow-3"></div>
+
+  <!-- Main App Wrapper -->
+  <div class="app-container">
+    
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand-badge">
+          <span class="brand-icon">⚡</span>
+          <div class="brand-text">
+            <h1 class="brand-title">FeedPulse</h1>
+            <span class="live-beacon">
+              <span class="pulse-dot"></span>
+              <span class="beacon-label" id="system-status-text">Live Polling</span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <button class="btn-icon" id="btn-quick-check" title="Trigger instant feed check">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+          <span class="btn-label-desktop">Check</span>
+        </button>
+
+        <div class="user-pill" id="user-pill">
+          <div class="avatar" id="user-avatar">U</div>
+          <div class="user-meta">
+            <span class="user-name" id="user-name">User</span>
+            <span class="user-role-badge" id="user-role">Guest</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Stats Ribbon -->
+    <section class="stats-ribbon" id="stats-ribbon">
+      <div class="stat-card">
+        <div class="stat-icon stat-icon-blue">📋</div>
+        <div class="stat-data">
+          <span class="stat-val" id="stat-total-feeds">0</span>
+          <span class="stat-title">My Feeds</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon stat-icon-green">🟢</div>
+        <div class="stat-data">
+          <span class="stat-val" id="stat-active-feeds">0</span>
+          <span class="stat-title">Active</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon stat-icon-amber">⏸️</div>
+        <div class="stat-data">
+          <span class="stat-val" id="stat-paused-feeds">0</span>
+          <span class="stat-title">Paused</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon stat-icon-purple">⏱️</div>
+        <div class="stat-data">
+          <span class="stat-val" id="stat-interval">120s</span>
+          <span class="stat-title">Interval</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs" role="tablist">
+      <button class="tab-btn active" data-tab="feeds" role="tab" aria-selected="true" id="tab-btn-feeds">
+        <span class="tab-icon">📋</span>
+        <span class="tab-label">Subscriptions</span>
+        <span class="badge" id="nav-feeds-count">0</span>
+      </button>
+      <button class="tab-btn" data-tab="add" role="tab" aria-selected="false" id="tab-btn-add">
+        <span class="tab-icon">➕</span>
+        <span class="tab-label">Add Feed</span>
+      </button>
+      <button class="tab-btn" data-tab="inspect" role="tab" aria-selected="false" id="tab-btn-inspect">
+        <span class="tab-icon">🔍</span>
+        <span class="tab-label">Live Preview</span>
+      </button>
+      <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false" id="tab-btn-settings">
+        <span class="tab-icon">⚙️</span>
+        <span class="tab-label">Settings</span>
+      </button>
+    </nav>
+
+    <!-- Main Views Area -->
+    <main class="views-wrapper">
+
+      <!-- View 1: Subscriptions -->
+      <section class="view-panel active" id="view-feeds" role="tabpanel">
+        <div class="toolbar">
+          <div class="search-box">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" id="feeds-search-input" placeholder="Search by title, keyword, or URL..." autocomplete="off">
+            <button class="search-clear" id="search-clear-btn" style="display: none;">&times;</button>
+          </div>
+
+          <div class="filter-controls">
+            <select id="filter-status-select" class="dropdown-filter">
+              <option value="all">Status: All</option>
+              <option value="active">🟢 Active Only</option>
+              <option value="paused">⏸️ Paused Only</option>
+            </select>
+            <button class="btn-refresh" id="btn-refresh-feeds" title="Refresh feeds list">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Feeds Cards Container -->
+        <div class="feeds-grid" id="feeds-grid">
+          <!-- Populated dynamically via JS -->
+          <div class="loading-state">
+            <div class="spinner"></div>
+            <p>Loading your feed subscriptions...</p>
+          </div>
+        </div>
+
+        <!-- Empty State -->
+        <div class="empty-state" id="feeds-empty-state" style="display: none;">
+          <div class="empty-icon">📡</div>
+          <h3>No Feeds Found</h3>
+          <p id="empty-state-msg">You have not subscribed to any feeds yet, or no feeds matched your search.</p>
+          <button class="btn btn-primary" id="btn-empty-add">
+            ➕ Add Your First Feed
+          </button>
+        </div>
+      </section>
+
+      <!-- View 2: Add Feed Wizard -->
+      <section class="view-panel" id="view-add" role="tabpanel">
+        <div class="card-glass form-card">
+          <div class="form-header">
+            <h2>➕ Add Feed Subscription</h2>
+            <p>Subscribe to RSS, Atom, or BitTorrent release feeds with instant keyword filtering.</p>
+          </div>
+
+          <form id="add-feed-form" class="feed-form" novalidate>
+            <!-- Feed URL -->
+            <div class="form-group">
+              <label for="add-feed-url">Feed RSS URL <span class="required">*</span></label>
+              <div class="input-with-action">
+                <input type="url" id="add-feed-url" placeholder="https://example.com/rss/ or magnet feed..." required autocomplete="off">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-validate-rss">
+                  ⚡ Test
+                </button>
+              </div>
+              <span class="field-hint" id="add-url-validation-hint">Supports RSS 2.0, Atom, Limetorrents, Nyaa, 1337x, Jackett, Prowlarr.</span>
+            </div>
+
+            <!-- Custom Movie / Series Title -->
+            <div class="form-group">
+              <label for="add-feed-title">Custom Series / Movie Name <span class="optional">(Optional)</span></label>
+              <input type="text" id="add-feed-title" placeholder="e.g. Solo Leveling, Breaking Bad, PSA 1080p" autocomplete="off">
+              <span class="field-hint">Overrides default RSS title in alerts for clean series identification.</span>
+            </div>
+
+            <!-- Quick Filter Presets -->
+            <div class="form-group">
+              <label>Quick Keyword Presets</label>
+              <div class="presets-container">
+                <button type="button" class="preset-chip" data-type="inc" data-val="1080p">+ 1080p</button>
+                <button type="button" class="preset-chip" data-type="inc" data-val="2160p">+ 4K / 2160p</button>
+                <button type="button" class="preset-chip" data-type="inc" data-val="x265">+ x265 / HEVC</button>
+                <button type="button" class="preset-chip" data-type="inc" data-val="PSA">+ PSA</button>
+                <button type="button" class="preset-chip chip-danger" data-type="exc" data-val="CAM">- CAM</button>
+                <button type="button" class="preset-chip chip-danger" data-type="exc" data-val="Telesync">- Telesync</button>
+                <button type="button" class="preset-chip chip-danger" data-type="exc" data-val="Hindi Dub">- Hindi Dub</button>
+              </div>
+            </div>
+
+            <!-- Include Filter Keywords -->
+            <div class="form-group">
+              <label for="add-inc-keywords">Include Filter Keywords <span class="optional">(Must Match)</span></label>
+              <div class="tag-input-container" id="inc-tags-container">
+                <input type="text" id="add-inc-keywords" placeholder="Type words & press Enter or comma (e.g. 1080p, x265)...">
+              </div>
+              <span class="field-hint">Supports Boolean logic like: <code>1080p or 720p | PSA | x265</code></span>
+            </div>
+
+            <!-- Exclude Filter Keywords -->
+            <div class="form-group">
+              <label for="add-exc-keywords">Exclude Filter Keywords <span class="optional">(Blacklist)</span></label>
+              <div class="tag-input-container tag-input-danger" id="exc-tags-container">
+                <input type="text" id="add-exc-keywords" placeholder="Type words to ignore (e.g. 720p, cam, sample)...">
+              </div>
+            </div>
+
+            <!-- File Size Limits -->
+            <div class="form-row">
+              <div class="form-group col-half">
+                <label for="add-min-size">Min File Size</label>
+                <div class="size-input-group">
+                  <input type="number" id="add-min-size" placeholder="0" min="0" step="0.1">
+                  <select id="add-min-size-unit">
+                    <option value="MB">MB</option>
+                    <option value="GB" selected>GB</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-group col-half">
+                <label for="add-max-size">Max File Size</label>
+                <div class="size-input-group">
+                  <input type="number" id="add-max-size" placeholder="None" min="0" step="0.1">
+                  <select id="add-max-size-unit">
+                    <option value="MB">MB</option>
+                    <option value="GB" selected>GB</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Destination & Case Sensitive -->
+            <div class="form-row">
+              <div class="form-group col-half">
+                <label for="add-destination">Notification Destination</label>
+                <select id="add-destination" class="dropdown-filter">
+                  <option value="">Personal DM (Your Private Chat)</option>
+                  <!-- Populated from destinations API -->
+                </select>
+              </div>
+
+              <div class="form-group col-half toggle-group">
+                <label for="add-case-sensitive">Case Sensitive Match</label>
+                <label class="switch">
+                  <input type="checkbox" id="add-case-sensitive">
+                  <span class="slider round"></span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Submit -->
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary btn-lg" id="btn-submit-add">
+                ⚡ Subscribe to Feed
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- View 3: Live Preview & Torrent Inspector -->
+      <section class="view-panel" id="view-inspect" role="tabpanel">
+        <div class="card-glass inspect-header-card">
+          <h2>🔍 Live Feed & Torrent Inspector</h2>
+          <p>Inspect real-time entries directly from any feed, check seeds, file sizes, and 1-click copy magnet links.</p>
+
+          <div class="inspect-search-bar">
+            <input type="url" id="inspect-url-input" placeholder="Enter RSS URL to test, or select from active feeds..." autocomplete="off">
+            <button class="btn btn-primary" id="btn-run-inspect">
+              Inspect Live
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Items Stream -->
+        <div class="inspect-results" id="inspect-results">
+          <div class="empty-state">
+            <div class="empty-icon">🧲</div>
+            <h3>Ready to Inspect</h3>
+            <p>Enter an RSS feed URL above or click "Inspect" on any subscription in your list.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- View 4: Settings & Diagnostics -->
+      <section class="view-panel" id="view-settings" role="tabpanel">
+        <div class="settings-grid">
+          
+          <!-- Appearance & Formats -->
+          <div class="card-glass settings-card">
+            <div class="card-title-row">
+              <span class="card-icon">🎨</span>
+              <h3>Telegram Formatting</h3>
+            </div>
+            <p>Enhance alert messages in Telegram with modern rich typography and expandable quote cards.</p>
+
+            <div class="setting-item">
+              <div class="setting-text">
+                <strong>Expandable Rich Text</strong>
+                <span>Hides long magnet URIs inside collapsible blockquotes to keep chats clean and modern.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggle-rich-text">
+                <span class="slider round"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Engine Status -->
+          <div class="card-glass settings-card">
+            <div class="card-title-row">
+              <span class="card-icon">⚡</span>
+              <h3>Poller Engine & Core</h3>
+            </div>
+            
+            <div class="info-list">
+              <div class="info-row">
+                <span class="info-key">Poller Status</span>
+                <span class="info-val badge-success">ACTIVE ●</span>
+              </div>
+              <div class="info-row">
+                <span class="info-key">Check Interval</span>
+                <span class="info-val" id="settings-interval-val">120 seconds</span>
+              </div>
+              <div class="info-row">
+                <span class="info-key">Smart Title Deduplication</span>
+                <span class="info-val" id="settings-dedup-val">Disabled</span>
+              </div>
+              <div class="info-row">
+                <span class="info-key">Web App Mode</span>
+                <span class="info-val" id="settings-app-mode">Telegram Mini App</span>
+              </div>
+            </div>
+
+            <div class="card-actions">
+              <button class="btn btn-secondary w-100" id="btn-force-check-settings">
+                🔄 Force Immediate Poll Cycle
+              </button>
+            </div>
+          </div>
+
+          <!-- Security & Access -->
+          <div class="card-glass settings-card">
+            <div class="card-title-row">
+              <span class="card-icon">🛡️</span>
+              <h3>Access & Role</h3>
+            </div>
+
+            <div class="info-list">
+              <div class="info-row">
+                <span class="info-key">Your User ID</span>
+                <span class="info-val code" id="settings-user-id">---</span>
+              </div>
+              <div class="info-row">
+                <span class="info-key">Access Level</span>
+                <span class="info-val" id="settings-user-role">---</span>
+              </div>
+              <div class="info-row">
+                <span class="info-key">Personal Notifications</span>
+                <span class="info-val badge-success">Supported 👤</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Edit Feed Modal -->
+  <div class="modal-backdrop" id="edit-modal-backdrop" style="display: none;">
+    <div class="modal-card card-glass">
+      <div class="modal-header">
+        <h3>✏️ Edit Feed Subscription</h3>
+        <button class="modal-close" id="btn-close-edit-modal">&times;</button>
+      </div>
+
+      <form id="edit-feed-form" class="feed-form">
+        <input type="hidden" id="edit-feed-id">
+        <input type="hidden" id="edit-target-id">
+
+        <div class="form-group">
+          <label for="edit-feed-title">Series / Custom Title</label>
+          <input type="text" id="edit-feed-title" required autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="edit-feed-url">Feed RSS URL</label>
+          <input type="url" id="edit-feed-url" required autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="edit-inc-keywords">Include Keywords</label>
+          <input type="text" id="edit-inc-keywords" placeholder="e.g. 1080p, x265, PSA">
+        </div>
+
+        <div class="form-group">
+          <label for="edit-exc-keywords">Exclude Keywords</label>
+          <input type="text" id="edit-exc-keywords" placeholder="e.g. 720p, cam, sample">
+        </div>
+
+        <div class="form-row">
+          <div class="form-group col-half">
+            <label for="edit-case-sensitive">Case Sensitive</label>
+            <label class="switch">
+              <input type="checkbox" id="edit-case-sensitive">
+              <span class="slider round"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-edit">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-save-edit">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast Notification System -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Application Logic -->
+  <script src="js/telegram.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
