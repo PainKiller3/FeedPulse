@@ -60,6 +60,7 @@ class TelegramBotService:
         self._dm_member_cache: Set[int] = set()
         self.max_feeds_per_user: int = max_feeds_per_user
         self.webapp_url: str = webapp_url.rstrip("/") if webapp_url else ""
+        self.bot_username: str = ""
         self.application: Optional[Application] = None
 
     def is_super_user(self, user_id: int) -> bool:
@@ -192,6 +193,7 @@ class TelegramBotService:
         await self.application.start()
         await self.application.updater.start_polling(drop_pending_updates=True)
         bot_info = await self.application.bot.get_me()
+        self.bot_username = bot_info.username or ""
         logger.info(
             "Telegram Bot started successfully as @%s (ID: %s)",
             bot_info.username,
@@ -231,7 +233,7 @@ class TelegramBotService:
             try:
                 await self.application.bot.set_chat_menu_button(
                     menu_button=MenuButtonWebApp(
-                        text="FeedPulse",
+                        text="Open",
                         web_app=WebAppInfo(url=self.webapp_url),
                     )
                 )
@@ -479,6 +481,32 @@ class TelegramBotService:
         )
         user = update.effective_user
         user_id = user.id if user else 0
+        chat = update.effective_chat
+        is_private = bool(chat and chat.type == "private")
+        bot_uname = self.bot_username or (
+            context.bot.username if context.bot else "FeedPulseRss_Bot"
+        )
+
+        # Redirect /start webapp or /start startapp to cmd_webapp
+        if context.args and any(
+            a.lower().startswith(("webapp", "app", "dashboard")) for a in context.args
+        ):
+            await self.cmd_webapp(update, context)
+            return
+
+        # Ensure user's bottom left button switches to [ Open ] in private DM
+        if self.webapp_url and is_private and chat:
+            try:
+                await context.bot.set_chat_menu_button(
+                    chat_id=chat.id,
+                    menu_button=MenuButtonWebApp(
+                        text="Open",
+                        web_app=WebAppInfo(url=self.webapp_url),
+                    ),
+                )
+            except Exception:
+                pass
+
         buttons = [
             [
                 InlineKeyboardButton(
@@ -488,15 +516,30 @@ class TelegramBotService:
             ]
         ]
         if self.webapp_url:
-            buttons.insert(
-                0,
-                [
-                    InlineKeyboardButton(
-                        "🚀 Launch Web App",
-                        web_app=WebAppInfo(url=self.webapp_url),
-                    )
-                ],
-            )
+            if is_private:
+                buttons.insert(
+                    0,
+                    [
+                        InlineKeyboardButton(
+                            "🚀 Launch Web App",
+                            web_app=WebAppInfo(url=self.webapp_url),
+                        )
+                    ],
+                )
+            else:
+                buttons.insert(
+                    0,
+                    [
+                        InlineKeyboardButton(
+                            "🚀 Launch in Telegram",
+                            url=f"https://t.me/{bot_uname}?startapp=dashboard",
+                        ),
+                        InlineKeyboardButton(
+                            "🌐 Web Dashboard",
+                            url=self.webapp_url,
+                        ),
+                    ],
+                )
         reply_markup = InlineKeyboardMarkup(buttons)
         await update.effective_message.reply_html(
             text, reply_markup=reply_markup, disable_web_page_preview=True
@@ -509,6 +552,25 @@ class TelegramBotService:
         if not await self.check_authorization(update, context):
             return
 
+        chat = update.effective_chat
+        is_private = bool(chat and chat.type == "private")
+        bot_uname = self.bot_username or (
+            context.bot.username if context.bot else "FeedPulseRss_Bot"
+        )
+
+        # Ensure user's bottom left button switches to [ Open ] in private DM
+        if self.webapp_url and is_private and chat:
+            try:
+                await context.bot.set_chat_menu_button(
+                    chat_id=chat.id,
+                    menu_button=MenuButtonWebApp(
+                        text="Open",
+                        web_app=WebAppInfo(url=self.webapp_url),
+                    ),
+                )
+            except Exception:
+                pass
+
         if self.webapp_url:
             text = (
                 "⚡ <b>FeedPulse Web App Control Center</b>\n\n"
@@ -519,16 +581,32 @@ class TelegramBotService:
                 "• ⚙️ <b>Instant Actions:</b> One-click pause, resume, and instant polling cycles\n\n"
                 "<i>Tap the button below to launch:</i>"
             )
-            reply_markup = InlineKeyboardMarkup(
-                [
+            if is_private:
+                reply_markup = InlineKeyboardMarkup(
                     [
-                        InlineKeyboardButton(
-                            "🚀 Launch Control Center",
-                            web_app=WebAppInfo(url=self.webapp_url),
-                        )
+                        [
+                            InlineKeyboardButton(
+                                "🚀 Launch Control Center",
+                                web_app=WebAppInfo(url=self.webapp_url),
+                            )
+                        ]
                     ]
-                ]
-            )
+                )
+            else:
+                reply_markup = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🚀 Launch in Telegram",
+                                url=f"https://t.me/{bot_uname}?startapp=dashboard",
+                            ),
+                            InlineKeyboardButton(
+                                "🌐 Open Web Dashboard",
+                                url=self.webapp_url,
+                            ),
+                        ]
+                    ]
+                )
             await update.effective_message.reply_html(
                 text, reply_markup=reply_markup, disable_web_page_preview=True
             )
@@ -2192,14 +2270,29 @@ class TelegramBotService:
 
         keyboard = []
         if self.webapp_url:
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        "🚀 Open Web App Dashboard",
-                        web_app=WebAppInfo(url=self.webapp_url),
-                    )
-                ]
-            )
+            bot_uname = self.bot_username or "FeedPulseRss_Bot"
+            if chat_id > 0:  # Private Chat
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🚀 Open Web App Dashboard",
+                            web_app=WebAppInfo(url=self.webapp_url),
+                        )
+                    ]
+                )
+            else:  # Group / Channel
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🚀 Launch in Telegram",
+                            url=f"https://t.me/{bot_uname}?startapp=dashboard",
+                        ),
+                        InlineKeyboardButton(
+                            "🌐 Web Dashboard",
+                            url=self.webapp_url,
+                        ),
+                    ]
+                )
 
         keyboard.extend(
             [
@@ -2260,6 +2353,19 @@ class TelegramBotService:
         chat_title = chat.title or (
             f"@{chat.username}" if chat.username else f"Chat {chat_id}"
         )
+
+        # Ensure user's bottom left button switches to [ Open ] in private DM
+        if self.webapp_url and chat and chat.type == "private":
+            try:
+                await context.bot.set_chat_menu_button(
+                    chat_id=chat.id,
+                    menu_button=MenuButtonWebApp(
+                        text="Open",
+                        web_app=WebAppInfo(url=self.webapp_url),
+                    ),
+                )
+            except Exception:
+                pass
 
         text, reply_markup = await self._build_main_menu(user_id, chat_id, chat_title)
         await update.effective_message.reply_html(

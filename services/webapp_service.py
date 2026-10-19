@@ -4,6 +4,7 @@ Provides high-performance async REST API and static asset hosting for the FeedPu
 Built using aiohttp for seamless asyncio event loop integration alongside the Telegram & Discord bots.
 """
 
+from datetime import date, datetime
 import hashlib
 import hmac
 import json
@@ -20,7 +21,28 @@ from parser.feed_parser import FeedParser
 from services.dispatcher import NotificationDispatcher
 from services.poller import FeedPoller
 
+try:
+    from config import POLL_INTERVAL_SECONDS
+except ImportError:
+    from config_sample import POLL_INTERVAL_SECONDS
+
 logger = logging.getLogger("FeedPulse.WebApp")
+
+
+def safe_json_dumps(obj: Any) -> str:
+    """Serialize objects to JSON safely, handling datetimes and non-standard types."""
+
+    def default_serializer(o: Any) -> Any:
+        if isinstance(o, (datetime, date)):
+            return o.isoformat()
+        return str(o)
+
+    return json.dumps(obj, default=default_serializer)
+
+
+def safe_json_response(data: Any, status: int = 200) -> web.Response:
+    """Helper to return JSON response with automatic datetime and ObjectId serialization."""
+    return web.json_response(data, status=status, dumps=safe_json_dumps)
 
 
 def validate_telegram_init_data(
@@ -198,7 +220,7 @@ class WebAppServer:
         user_subs = await self.db.list_user_all_subscriptions(uid)
         active_feeds = await self.db.get_active_feeds()
 
-        return web.json_response(
+        return safe_json_response(
             {
                 "user": user,
                 "role": role,
@@ -206,7 +228,9 @@ class WebAppServer:
                 "stats": {
                     "my_feeds_count": len(user_subs),
                     "total_system_feeds": len(active_feeds),
-                    "poll_interval_seconds": self.poller.interval_seconds,
+                    "poll_interval_seconds": getattr(
+                        self.poller, "poll_interval", POLL_INTERVAL_SECONDS
+                    ),
                     "is_rich_text": self.dispatcher.is_rich_text_enabled(str(uid)),
                 },
                 "destinations": destinations,
@@ -235,7 +259,7 @@ class WebAppServer:
                 item["_id"] = str(item["_id"])
             cleaned.append(item)
 
-        return web.json_response({"feeds": cleaned, "count": len(cleaned)})
+        return safe_json_response({"feeds": cleaned, "count": len(cleaned)})
 
     async def handle_api_add_feed(self, request: web.Request) -> web.Response:
         """Subscribe to a new feed with filters and destination."""
@@ -245,7 +269,7 @@ class WebAppServer:
         try:
             data = await request.json()
         except Exception:
-            return web.json_response({"error": "Invalid JSON body"}, status=400)
+            return safe_json_response({"error": "Invalid JSON body"}, status=400)
 
         url = (data.get("url") or "").strip()
         title = (data.get("title") or "").strip()
@@ -264,7 +288,7 @@ class WebAppServer:
         min_size = data.get("min_size")
 
         if not url:
-            return web.json_response({"error": "Feed URL is required"}, status=400)
+            return safe_json_response({"error": "Feed URL is required"}, status=400)
 
         # Pre-validate RSS feed
         try:
@@ -272,7 +296,7 @@ class WebAppServer:
                 self._session, url
             )
             if status_code != 200 and not items:
-                return web.json_response(
+                return safe_json_response(
                     {
                         "error": f"Could not fetch feed (HTTP {status_code}). Please verify URL."
                     },
@@ -300,7 +324,7 @@ class WebAppServer:
             # Trigger background poll cycle
             self.poller.trigger_immediate_check()
 
-            return web.json_response(
+            return safe_json_response(
                 {
                     "success": True,
                     "feed_id": feed_id,
@@ -311,7 +335,7 @@ class WebAppServer:
             )
         except Exception as e:
             logger.error("Failed to add feed via WebApp: %s", e)
-            return web.json_response({"error": str(e)}, status=500)
+            return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_pause_feed(self, request: web.Request) -> web.Response:
         """Pause or resume a feed."""
@@ -335,7 +359,7 @@ class WebAppServer:
                 is_admin=is_admin,
             )
             if success:
-                return web.json_response(
+                return safe_json_response(
                     {
                         "success": True,
                         "feed_id": feed_id,
@@ -343,11 +367,11 @@ class WebAppServer:
                         "title": title,
                     }
                 )
-            return web.json_response(
+            return safe_json_response(
                 {"error": "Feed not found or permission denied"}, status=404
             )
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_delete_feed(self, request: web.Request) -> web.Response:
         """Unsubscribe from a feed."""
@@ -366,18 +390,18 @@ class WebAppServer:
                 is_admin=is_admin,
             )
             if success:
-                return web.json_response(
+                return safe_json_response(
                     {
                         "success": True,
                         "feed_id": feed_id,
                         "message": f"Successfully unsubscribed from {title or feed_id}",
                     }
                 )
-            return web.json_response(
+            return safe_json_response(
                 {"error": "Feed not found or permission denied"}, status=404
             )
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_edit_feed(self, request: web.Request) -> web.Response:
         """Edit feed title, filters, or URL in-place."""
@@ -389,7 +413,7 @@ class WebAppServer:
         try:
             data = await request.json()
         except Exception:
-            return web.json_response({"error": "Invalid JSON body"}, status=400)
+            return safe_json_response({"error": "Invalid JSON body"}, status=400)
 
         title = data.get("title")
         inc_filter = data.get("filter_keywords")
@@ -416,12 +440,12 @@ class WebAppServer:
                 is_admin=is_admin,
             )
             if status == "success":
-                return web.json_response(
+                return safe_json_response(
                     {"success": True, "feed_id": feed_id, "changed": changed}
                 )
-            return web.json_response({"error": status}, status=400)
+            return safe_json_response({"error": status}, status=400)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_inspect_feed(self, request: web.Request) -> web.Response:
         """Inspect live feed items from an active feed ID or test arbitrary URL."""
@@ -434,7 +458,7 @@ class WebAppServer:
                 url = feed_doc.get("url")
 
         if not url:
-            return web.json_response(
+            return safe_json_response(
                 {"error": "Feed URL or valid feed_id is required"}, status=400
             )
 
@@ -458,7 +482,7 @@ class WebAppServer:
                         "description": (item.description or "")[:300],
                     }
                 )
-            return web.json_response(
+            return safe_json_response(
                 {
                     "url": url,
                     "title": feed_title or url,
@@ -469,12 +493,12 @@ class WebAppServer:
             )
         except Exception as e:
             logger.error("Live inspect error for %s: %s", url, e)
-            return web.json_response({"error": str(e)}, status=500)
+            return safe_json_response({"error": str(e)}, status=500)
 
     async def handle_api_system_check(self, request: web.Request) -> web.Response:
         """Trigger an immediate feed poll check cycle."""
         self.poller.trigger_immediate_check()
-        return web.json_response(
+        return safe_json_response(
             {
                 "success": True,
                 "message": "Immediate feed check cycle triggered!",
@@ -484,11 +508,13 @@ class WebAppServer:
     async def handle_api_system_stats(self, request: web.Request) -> web.Response:
         """Get live system stats and diagnostics."""
         active_feeds = await self.db.get_active_feeds()
-        return web.json_response(
+        return safe_json_response(
             {
                 "status": "online",
                 "active_feeds_count": len(active_feeds),
-                "poll_interval_seconds": getattr(self.poller, "interval_seconds", 120),
+                "poll_interval_seconds": getattr(
+                    self.poller, "poll_interval", POLL_INTERVAL_SECONDS
+                ),
                 "smart_deduplication": bool(
                     getattr(self.poller, "smart_title_deduplication", False)
                 ),
@@ -513,7 +539,9 @@ class WebAppServer:
 
         await self.db.set_chat_setting(target_id, "rich_text", enabled)
         self.dispatcher.set_rich_text(target_id, enabled)
-        return web.json_response({"target_id": target_id, "rich_text_enabled": enabled})
+        return safe_json_response(
+            {"target_id": target_id, "rich_text_enabled": enabled}
+        )
 
     # ---------------- Lifecycle ----------------
 

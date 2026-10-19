@@ -42,6 +42,14 @@ class FeedPoller:
         self._manual_trigger_event = asyncio.Event()
         self._last_cleanup_time = 0.0
 
+    @property
+    def poll_interval(self) -> int:
+        return POLL_INTERVAL_SECONDS
+
+    @property
+    def interval_seconds(self) -> int:
+        return POLL_INTERVAL_SECONDS
+
     async def start(self) -> None:
         """Start the background polling loop."""
         if self._running:
