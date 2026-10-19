@@ -30,6 +30,11 @@ POLL_INTERVAL_SECONDS = int(
     or getattr(config, "POLL_INTERVAL_SECONDS", 120)
 )
 WEBAPP_URL = os.environ.get("WEBAPP_URL") or getattr(config, "WEBAPP_URL", "").strip()
+WEBAPP_SHORT_NAME = (
+    os.environ.get("WEBAPP_SHORT_NAME")
+    or getattr(config, "WEBAPP_SHORT_NAME", "")
+    or ""
+).strip()
 WEBAPP_PORT = int(
     os.environ.get("PORT")
     or os.environ.get("WEBAPP_PORT")
@@ -173,6 +178,7 @@ async def main() -> None:
             sudo_users=SUDO_USERS,
             max_feeds_per_user=MAX_FEEDS_PER_USER,
             webapp_url=WEBAPP_URL,
+            webapp_short_name=WEBAPP_SHORT_NAME,
         )
     else:
         logger.info("Telegram Bot is disabled (BOT_TOKEN not provided).")

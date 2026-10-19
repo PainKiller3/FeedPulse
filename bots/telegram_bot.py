@@ -47,6 +47,7 @@ class TelegramBotService:
         sudo_users: Optional[List[int]] = None,
         max_feeds_per_user: int = 25,
         webapp_url: str = "",
+        webapp_short_name: str = "",
     ):
         self.token = token
         self.db = db
@@ -60,8 +61,27 @@ class TelegramBotService:
         self._dm_member_cache: Set[int] = set()
         self.max_feeds_per_user: int = max_feeds_per_user
         self.webapp_url: str = webapp_url.rstrip("/") if webapp_url else ""
+        self.webapp_short_name: str = webapp_short_name.strip()
         self.bot_username: str = ""
         self.application: Optional[Application] = None
+
+    def get_group_webapp_btn(self) -> InlineKeyboardButton:
+        """
+        Generate error-proof inline button for group chats.
+        - If webapp_short_name is configured in BotFather (/newapp): direct in-telegram link https://t.me/<bot>/<app>.
+        - Otherwise: deep link to bot DM https://t.me/<bot>?start=webapp (never triggers BOT_INVALID).
+        """
+        bot_uname = self.bot_username or "FeedPulseRss_Bot"
+        short_name = getattr(self, "webapp_short_name", "") or ""
+        if short_name:
+            return InlineKeyboardButton(
+                "🚀 Launch in Telegram",
+                url=f"https://t.me/{bot_uname}/{short_name}",
+            )
+        return InlineKeyboardButton(
+            "🚀 Launch in Telegram",
+            url=f"https://t.me/{bot_uname}?start=webapp",
+        )
 
     def is_super_user(self, user_id: int) -> bool:
         """Check if a user has bot owner or sudo privileges."""
@@ -483,9 +503,6 @@ class TelegramBotService:
         user_id = user.id if user else 0
         chat = update.effective_chat
         is_private = bool(chat and chat.type == "private")
-        bot_uname = self.bot_username or (
-            context.bot.username if context.bot else "FeedPulseRss_Bot"
-        )
 
         # Redirect /start webapp or /start startapp to cmd_webapp
         if context.args and any(
@@ -530,10 +547,7 @@ class TelegramBotService:
                 buttons.insert(
                     0,
                     [
-                        InlineKeyboardButton(
-                            "🚀 Launch in Telegram",
-                            url=f"https://t.me/{bot_uname}?startapp=dashboard",
-                        ),
+                        self.get_group_webapp_btn(),
                         InlineKeyboardButton(
                             "🌐 Web Dashboard",
                             url=self.webapp_url,
@@ -554,9 +568,6 @@ class TelegramBotService:
 
         chat = update.effective_chat
         is_private = bool(chat and chat.type == "private")
-        bot_uname = self.bot_username or (
-            context.bot.username if context.bot else "FeedPulseRss_Bot"
-        )
 
         # Ensure user's bottom left button switches to [ Open ] in private DM
         if self.webapp_url and is_private and chat:
@@ -596,10 +607,7 @@ class TelegramBotService:
                 reply_markup = InlineKeyboardMarkup(
                     [
                         [
-                            InlineKeyboardButton(
-                                "🚀 Launch in Telegram",
-                                url=f"https://t.me/{bot_uname}?startapp=dashboard",
-                            ),
+                            self.get_group_webapp_btn(),
                             InlineKeyboardButton(
                                 "🌐 Open Web Dashboard",
                                 url=self.webapp_url,
@@ -2270,7 +2278,6 @@ class TelegramBotService:
 
         keyboard = []
         if self.webapp_url:
-            bot_uname = self.bot_username or "FeedPulseRss_Bot"
             if chat_id > 0:  # Private Chat
                 keyboard.append(
                     [
@@ -2283,10 +2290,7 @@ class TelegramBotService:
             else:  # Group / Channel
                 keyboard.append(
                     [
-                        InlineKeyboardButton(
-                            "🚀 Launch in Telegram",
-                            url=f"https://t.me/{bot_uname}?startapp=dashboard",
-                        ),
+                        self.get_group_webapp_btn(),
                         InlineKeyboardButton(
                             "🌐 Web Dashboard",
                             url=self.webapp_url,

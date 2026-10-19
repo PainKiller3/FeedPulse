@@ -37,6 +37,7 @@ WEBAPP_HOST = "0.0.0.0"  # Interface to bind to
 WEBAPP_URL = ""  # Public HTTPS URL of the Web App (e.g. "https://feedpulse.yourdomain.com", Render URL, or Cloudflare Tunnel)
 # Note: Telegram requires an HTTPS URL to launch Mini Apps inside the Telegram client.
 # Once set, users can open the dashboard via /webapp or the Telegram Chat Menu button.
+WEBAPP_SHORT_NAME = ""  # Optional: App short name if configured via BotFather /newapp (e.g. "dashboard")
 
 # ==============================================================================
 # NOTIFICATION TEMPLATES & RICH TEXT
