@@ -258,6 +258,13 @@ const App = (function () {
   // ---------------- API Calls ----------------
 
   async function loadUserAndStats() {
+    // Pre-populate with Telegram SDK user info immediately
+    const tgUser = TelegramBridge.getUser();
+    if (tgUser && dom.userName) {
+      dom.userName.textContent = tgUser.first_name || 'User';
+      dom.userAvatar.textContent = (tgUser.first_name || 'U').charAt(0).toUpperCase();
+    }
+
     try {
       const res = await fetch('/api/me', { credentials: 'omit', headers: TelegramBridge.getAuthHeaders() });
       if (!res.ok) throw new Error('Failed to load profile');
@@ -267,9 +274,9 @@ const App = (function () {
       state.stats = data.stats || {};
 
       // Populate Header
-      dom.userName.textContent = state.user.first_name || 'User';
+      dom.userName.textContent = state.user.first_name || tgUser?.first_name || 'User';
       dom.userRole.textContent = data.role || 'User';
-      dom.userAvatar.textContent = (state.user.first_name || 'U').charAt(0).toUpperCase();
+      dom.userAvatar.textContent = (state.user.first_name || tgUser?.first_name || 'U').charAt(0).toUpperCase();
 
       // Populate Settings View
       dom.settingsUserId.textContent = state.user.id || '---';
