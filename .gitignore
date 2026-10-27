@@ -5,6 +5,9 @@ __pycache__/
 
 # Configuration & Environments
 config.py
+.env
+.env.*
+*.env
 .venv/
 env/
 venv/
